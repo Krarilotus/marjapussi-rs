@@ -1,19 +1,63 @@
 # Specification: Marjapussi Inference Engine
 
-## 1. Goal
-Build a deterministic inference engine that runs for each seat and maintains the strongest logically valid knowledge about every card, based on:
+## 1. Vision and Executive Summary
 
-1. Official game rules.
-2. Publicly observed actions.
-3. Private information visible to that seat (own hand, own pass interaction).
+This project defines a deterministic, incremental inference engine for Marjapussi.
+The engine consumes observed actions and produces seat-relative card-knowledge state after each action.
 
-The engine must update after every new action and produce:
+Primary objective:
 
-1. Current knowledge (facts and remaining possibilities).
-2. Derived tactical flags (standing cards, trump potential).
-3. Counterfactual knowledge impact for each own legal action.
+1. After every new action, each seat-specific engine updates:
+   1. public game state,
+   2. directly observed facts,
+   3. rule-derived card/location constraints.
 
-This document is the baseline specification for implementation and test design.
+Core architecture:
+
+1. `PublicGameState`:
+   1. Incremental, deterministic reducer of observed actions.
+   2. Contains the public game context at the current action index.
+2. `Source Knowledge`:
+   1. Facts directly observable from seat perspective.
+   2. Includes own cards, visible passes, played cards, QA/trump declarations.
+3. `Derived Knowledge`:
+   1. Rule-derived constraints such as possible holders, exclusions, suit constraints, standing flags, trump-change flags.
+   2. Stored as concrete facts (for example `NotInHand(card, player)`).
+
+Inference execution model:
+
+1. Forward-chaining agenda engine with precondition indexing.
+2. Only rules affected by changed facts are evaluated.
+3. Closure runs until no new facts are derivable.
+4. Monotonic in forward play; replay is fallback for validation and undo recovery.
+
+Purpose for model training:
+
+1. Provide deterministic input features for card-prediction and policy models.
+2. Preserve provenance (`which rule derived which fact`) for debugging.
+3. Keep simulation throughput high via optimized trace-off execution.
+
+Debug and performance stance:
+
+1. Debug trace is explicit and optional (`TraceMode`), off by default.
+2. With trace off: no trace IO and no trace formatting in the hot path.
+3. CI enforces benchmark thresholds to prevent regression.
+
+Definition of done:
+
+1. Soundness: inference is correct (no false-positive hard facts) on fixture and property tests.
+2. Completeness (deterministic domain): for each action index and seat, all facts that are logically derivable from:
+   1. game rules,
+   2. observed action history,
+   3. perspective visibility constraints,
+   4. set-theoretic/cardinality closure,
+   must be present in the derived state.
+3. Completeness scope includes at minimum:
+   1. all deterministically derivable `KnownHolder(card, player)` facts,
+   2. all deterministically derivable `NotInHand(card, player)` facts,
+   3. all equivalent deterministic consequences obtainable through repeated closure to fixed point.
+4. Rule engine reaches deterministic fixed points with stable outputs.
+5. Training-facing exports are versioned, deterministic, and separation-preserving (`source` vs `derived`).
 
 ## 2. Scope and Inference Policy
 
@@ -338,23 +382,7 @@ pub struct SuitKnowledgeSummary {
 }
 ```
 
-`KnowledgeState` must contain at least:
-
-1. `seat`: perspective seat.
-2. `public_state: PublicGameState`.
-3. `current_trump: Option<Suit>`.
-4. `trump_called: HashSet<Suit>`.
-5. `game_value_bid: i32` (last winning bid / announced value).
-6. `bidding_history`.
-7. `action_log: Vec<ObservedAction>`.
-8. `qa_interactions: Vec<QaInteraction>` (one object per ask-answer-resolution block).
-9. `trump_history` including actor, suit, source (`OwnCall`, `PairQuestion`, `HalfQuestion`), and `was_new_call`.
-10. `trick_history` with all played cards and winners.
-11. `current_trick_cards`.
-12. `hand_size[player]` current remaining cards count.
-13. `source_card_state[Card]` (ground-source facts only).
-14. `derived_card_state[Card]` (rule-derived facts).
-15. `fact_provenance` for each derived fact (`rule_id`, `event_index`, optional dependencies).
+The Rust schema above is the canonical `KnowledgeState` field definition.
 
 Ground-source vs derived must be explicit:
 
@@ -784,71 +812,19 @@ Output: rank actions by strategic objective plus information objective.
 
 ## 10. Data Types (Suggested Rust Shapes)
 
+Canonical schema definitions are in:
+
+1. section `5` (`PublicGameState` and related public-state types),
+2. section `6` (`KnowledgeState`, source/derived card knowledge, QA interaction).
+
+This section intentionally avoids duplicating those full structs.
+
 ```rust
 pub struct InferenceEngine {
     seat: PlaceAtTable,
     state: KnowledgeState,
     last_seen_event: usize,
-}
-
-pub struct KnowledgeState {
-    pub seat: PlaceAtTable,
-    pub public_state: PublicGameState,
-    pub current_trump: Option<Suit>,
-    pub trump_called: std::collections::HashSet<Suit>,
-    pub game_value_bid: i32,
-    pub current_trick_cards: Vec<(PlaceAtTable, Card)>,
-    pub hand_size: [u8; 4],
-    pub source_card_state: std::collections::HashMap<Card, SourceCardKnowledge>,
-    pub derived_card_state: std::collections::HashMap<Card, DerivedCardKnowledge>,
-    pub action_log: Vec<ObservedAction>,
-    pub qa_interactions: Vec<QaInteraction>,
-    pub trump_history: Vec<TrumpEvent>,
-    pub trick_history: Vec<ObservedTrick>,
-    pub bidding_history: Vec<(PlaceAtTable, BidAction)>,
-    pub fact_provenance: Vec<DerivedFactRecord>,
-    pub contradictions: Vec<String>,
-}
-
-pub struct PublicGameState {
-    pub phase: PublicPhase,
-    pub player_at_turn: PlaceAtTable,
-    pub current_value: i32,
-    pub bidding_history: Vec<(PlaceAtTable, BidAction)>,
-    pub playing_party: Option<[PlaceAtTable; 2]>,
-    pub current_trump: Option<Suit>,
-    pub trump_called: std::collections::HashSet<Suit>,
-    pub current_trick: Vec<(PlaceAtTable, Card)>,
-    pub finished_tricks: Vec<FinishedPublicTrick>,
-    pub hand_size: [u8; 4],
-    pub open_interaction: Option<OpenQaInteraction>,
-    pub start_ready: [bool; 4],
-}
-
-pub struct SourceCardKnowledge {
-    pub observed_owner: Option<PlaceAtTable>,
-    pub observed_played_info: Option<(u8, PlaceAtTable, u8)>,
-    pub observed_not_in_hand_mask: u8,
-}
-
-pub struct DerivedCardKnowledge {
-    pub known_holder: Option<PlaceAtTable>,
-    pub possible_holders_mask: u8, // lower 4 bits used
-    pub played_info: Option<(u8, PlaceAtTable, u8)>,
-    pub not_in_hand_mask: u8, // lower 4 bits used
-    pub standing_now: bool,
-    pub standing_if_trump_static: bool,
-    pub can_still_enable_future_trump: bool,
-}
-
-pub struct QaInteraction {
-    pub interaction_id: u32,
-    pub asker: PlaceAtTable,
-    pub responder: PlaceAtTable,
-    pub question: QaQuestion,
-    pub answer: QaAnswer,
-    pub resolution: QaResolution,
-    pub resolved_trump: Option<(Suit, bool)>,
+    config: InferenceConfig,
 }
 ```
 
@@ -879,6 +855,71 @@ Required public API for model-facing export:
 3. `fn export_training_frame(&self) -> TrainingFrame`
 
 `TrainingFrame` must keep source and derived features separated (do not flatten away provenance).
+
+### 10.2 Debug Observability and Trace Logging (normative)
+
+The inference engine must support a debug mode that explains rule matching and derived facts, while keeping simulation performance high when debug is disabled.
+
+```rust
+pub struct InferenceConfig {
+    pub trace_mode: TraceMode,
+    pub max_trace_events_per_action: usize,
+    pub enable_rule_noop_events: bool,
+}
+
+pub enum TraceMode {
+    Off, // default for training/simulation
+    RingBuffer { capacity: usize }, // in-memory inspection
+    JsonlFile { path: std::path::PathBuf }, // offline analysis
+}
+
+pub struct InferenceStepStats {
+    pub action_index: usize,
+    pub action: ObservedAction,
+    pub rules_considered: u32,
+    pub rules_matched: u32,
+    pub facts_emitted: u32,
+    pub closure_iterations: u32,
+    pub elapsed_micros: u64,
+}
+
+pub enum TraceEvent {
+    ActionApplied { action_index: usize, action: ObservedAction },
+    RuleMatched { rule_id: RuleId, bindings: Vec<Binding> },
+    RuleEmittedFacts { rule_id: RuleId, facts: Vec<Fact> },
+    RuleNoop { rule_id: RuleId, reason: NoopReason },
+    FactInserted { fact: Fact },
+    Contradiction { message: String },
+    ClosureDone { stats: InferenceStepStats },
+}
+```
+
+Runtime requirements:
+
+1. `TraceMode::Off` must be the default.
+2. With trace off:
+   1. no file IO,
+   2. no string formatting for trace messages,
+   3. no dynamic allocations caused by tracing in hot path.
+3. Trace data should use compact numeric IDs (`RuleId`, enum discriminants) and only expand to strings at render/export boundary.
+4. For file traces, write asynchronously (buffered writer) so inference step is not blocked by disk latency.
+5. Trace overflow in ring mode must be bounded and non-fatal (drop-oldest policy).
+
+API requirements:
+
+1. `apply_observed_action` should return `InferenceStepStats`.
+2. Engine exposes trace retrieval:
+   1. `fn drain_trace_events(&mut self) -> Vec<TraceEvent>` for in-memory mode.
+   2. file mode writes append-only JSONL with deterministic field order.
+3. Each emitted fact in debug mode should be attributable to:
+   1. triggering action index,
+   2. `rule_id`,
+   3. optional dependency facts (for explanation chains).
+
+Performance safety rule:
+
+1. All tracing code paths must be branch-gated by `trace_mode != Off`.
+2. Optionally add a compile-time feature gate (`inference_trace`) so production training builds can compile tracing out completely.
 
 ## 11. Test Specification
 
@@ -917,14 +958,67 @@ Required public API for model-facing export:
 
 ## 12. Milestone Plan
 
-1. Milestone 1: `observation.rs` + core `KnowledgeState`.
-2. Milestone 2: implement `R-BASE`, `R-PLAY`, `R-SET` minimal fixed point.
-3. Milestone 3: add `R-QA`, `R-TRP`, `R-STAND`.
-4. Milestone 4: action-impact layer.
-5. Milestone 5: full-game test suite and regression fixtures.
+1. Phase 0 - Baseline scaffolding:
+   1. implement `src/ai/types.rs` with canonical schemas,
+   2. implement incremental `PublicGameState` reducer,
+   3. add deterministic action replay harness.
+   4. Gate: reducer replay equals incremental state on curated games.
+2. Phase 1 - Core inference runtime:
+   1. implement fact store + indexes + watch index + agenda closure loop,
+   2. implement provenance storage and contradiction reporting.
+   3. Gate: fixed-point closure stable and deterministic for same action stream.
+3. Phase 2 - Foundational rule families:
+   1. implement `R-BASE`, `R-PLAY`, `R-SET`,
+   2. materialize dominance-like inferences to explicit `NotInHand` facts.
+   3. Gate: no false-positive known-holder assignments on ground-truth fixtures.
+4. Phase 3 - QA/trump/standing:
+   1. implement `R-QA`, `R-TRP`, `R-STAND`, `R-INV`,
+   2. validate all six QA sequence reconstructions end-to-end.
+   3. Gate: rule coverage tests pass for each rule ID.
+5. Phase 4 - Debug observability:
+   1. implement `TraceMode` (`Off`, `RingBuffer`, `JsonlFile`),
+   2. add per-action `InferenceStepStats`,
+   3. add trace inspector utility for development.
+   4. Gate: trace explains emitted facts with rule IDs and dependencies.
+6. Phase 5 - Performance hardening:
+   1. benchmark inference per action with trace off/on,
+   2. remove avoidable allocations in hot path (reuse buffers, smallvec/bitsets),
+   3. ensure rule matching scales with changed facts, not total rules.
+   4. Gate:
+      1. trace-off throughput meets target on reference benchmark,
+      2. trace-off build has no trace IO and no trace-format overhead,
+      3. trace-on overhead stays bounded and configurable.
+7. Phase 6 - Model-facing exports:
+   1. finalize `export_source_view`, `export_derived_view`, `export_training_frame`,
+   2. freeze schema versioning for downstream ML pipelines.
+   3. Gate: exported frames are deterministic and backwards-compatible per version.
+8. Phase 7 - Validation at scale:
+   1. full-game randomized/property tests,
+   2. regression snapshots after every action,
+   3. long-run simulation stability tests.
+   4. Gate: zero contradictions on valid generated games and no drift in snapshots.
 
-## 13. Non-goals (for this spec version)
+Required benchmark suite:
 
-1. Bidding-style heuristic inference.
-2. Opponent model probabilities in core deterministic layer.
-3. Search policy for best move selection (separate agent layer).
+1. `bench_inference_step_trace_off`
+2. `bench_inference_step_trace_ring`
+3. `bench_full_game_inference_trace_off`
+4. `bench_full_game_inference_trace_on_sampled`
+
+Performance acceptance criteria (set once and enforce in CI):
+
+1. Trace-off path is the optimization target for training workloads.
+2. Trace-on is debug-only and must never be enabled by default in large simulation runs.
+3. Default thresholds until project-specific tuning:
+   1. `bench_inference_step_trace_off`: fail if throughput drops >10% from pinned baseline.
+   2. `bench_full_game_inference_trace_off`: fail if runtime increases >10% from pinned baseline.
+   3. `bench_inference_step_trace_ring`: fail if debug mode is >3x slower than trace-off for same workload.
+4. Bench regressions beyond threshold fail CI.
+
+## 13. Optional Future Extensions
+
+This section is informational only and not part of the current implementation scope.
+
+1. Heuristic/probabilistic inference on top of deterministic facts (currently not planned as baseline because uncertainty handling is expected from trained ML agents).
+2. Opponent-style modeling as a separate module, if later needed for interpretability experiments.
+3. Search/policy optimization layers that consume inference outputs but remain outside the inference core.
