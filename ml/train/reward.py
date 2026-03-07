@@ -9,6 +9,10 @@ class RewardConfig:
     points_normalizer: float = 420.0
     # Reward used for pass games (no explicit playing_party contract winner/loser).
     passgame_base_reward: float = 115.0 / 420.0
+    # Additional scaling for raw pass-game margin signal (my_pts - opp_pts)/points_normalizer.
+    passgame_margin_weight: float = 0.25
+    # Flat penalty applied to all no-contract pass games to discourage "everyone pass" equilibrium.
+    no_contract_penalty: float = 0.35
     # Per-step point-delta scaling for dense intermediate reward.
     step_delta_scale: float = 1.0 / 420.0
 
@@ -79,11 +83,18 @@ def contract_reward_from_pov(
     playing_party_abs = None if playing_party_raw is None else int(playing_party_raw)
     if playing_party_abs is None:
         pov_pts, opp_pts = pov_team_points(info, pov_party)
+        sign = 0.0
         if pov_pts > opp_pts:
-            return cfg.passgame_base_reward, tricks_party_0, tricks_party_1, None
-        if opp_pts > pov_pts:
-            return -cfg.passgame_base_reward, tricks_party_0, tricks_party_1, None
-        return 0.0, tricks_party_0, tricks_party_1, None
+            sign = 1.0
+        elif opp_pts > pov_pts:
+            sign = -1.0
+        margin_norm = (pov_pts - opp_pts) / cfg.points_normalizer
+        no_contract_reward = (
+            sign * cfg.passgame_base_reward
+            + cfg.passgame_margin_weight * margin_norm
+            - cfg.no_contract_penalty
+        )
+        return float(no_contract_reward), tricks_party_0, tricks_party_1, None
 
     pov_eval, _opp_eval = pov_team_points_evaluated(info, pov_party)
     total = pov_eval / cfg.points_normalizer

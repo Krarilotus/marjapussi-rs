@@ -115,13 +115,27 @@ impl Game {
     }
 
     pub fn apply_action_mut(&mut self, action: GameAction) {
-        if let Ok(next) = self.apply_action(action.clone()) {
-            *self = next;
-        } else {
+        if !self.legal_actions.contains(&action) {
             eprintln!("Discarded illegal action: {:?}", action);
             eprintln!("Game state: {:#?}", self);
             panic!();
         }
+
+        let (next_game_meta, next_game_state, this_callback, last_state) =
+            action.action_type.clone().apply_action(&action, self);
+
+        let this_event = GameEvent {
+            last_action: action,
+            callback: this_callback,
+            player_at_turn: next_game_state.player_at_turn.clone(),
+            time: current_time_string(),
+        };
+
+        self.info = next_game_meta;
+        self.state = next_game_state;
+        self.last_state = last_state;
+        self.all_events.push(this_event);
+        self.legal_actions = self.legal_actions();
     }
 }
 

@@ -65,6 +65,12 @@ class LoadedModel:
     skipped_tensors: int
 
 
+@dataclass
+class SeatPolicy:
+    mode: str  # "model" | "heuristic" | "first_legal"
+    model: LoadedModel | None = None
+
+
 class LogSink:
     def __init__(self, echo: bool) -> None:
         self.echo = bool(echo)
@@ -73,7 +79,18 @@ class LogSink:
     def write(self, line: str) -> None:
         self.lines.append(line)
         if self.echo:
-            print(line)
+            try:
+                print(line)
+            except UnicodeEncodeError:
+                enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+                safe = (
+                    line.replace("\u2663", "C")
+                    .replace("\u2660", "S")
+                    .replace("\u2666", "D")
+                    .replace("\u2665", "H")
+                )
+                safe = safe.encode(enc, errors="replace").decode(enc, errors="replace")
+                print(safe)
 
 
 def card_idx_to_text(card_idx: int, ansi: bool = False) -> str:
@@ -213,6 +230,19 @@ def normalize_fixed_hands(raw_hands: Any) -> list[list[int]]:
     return out
 
 
+def resolve_start_hands(case_hands: Any, debug_hands: Any) -> list[list[int]] | None:
+    if case_hands is not None:
+        return case_hands
+    if not isinstance(debug_hands, list) or len(debug_hands) != 4:
+        return None
+    out: list[list[int]] = []
+    for hand in debug_hands:
+        if not isinstance(hand, list):
+            return None
+        out.append([int(c) for c in hand])
+    return out
+
+
 def format_hand(cards: list[int], ansi: bool = False) -> str:
     vals = sorted(int(c) for c in cards)
     return "[" + " ".join(card_idx_to_text(c, ansi=ansi) for c in vals) + "]"
@@ -272,7 +302,26 @@ def print_checkpoint_list(entries: list[tuple[str, Path]]) -> None:
 def resolve_checkpoint_spec(spec: str | None, entries: list[tuple[str, Path]]) -> Path | None:
     if spec is None or str(spec).strip() == "" or str(spec).strip().lower() in {"none", "heuristic"}:
         return None
-    s = str(spec).strip()
+    s = str(spec).strip().strip("\"'")
+    # Tolerate accidentally forwarded key=value fragments from wrappers.
+    for prefix in (
+        "checkpoint=",
+        "all-checkpoint=",
+        "all_checkpoint=",
+        "p0=",
+        "p1=",
+        "p2=",
+        "p3=",
+        "--checkpoint=",
+        "--all-checkpoint=",
+        "--p0=",
+        "--p1=",
+        "--p2=",
+        "--p3=",
+    ):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):].strip().strip("\"'")
+            break
 
     p = Path(s)
     if p.exists():
@@ -333,20 +382,21 @@ def load_model(path: Path, device: torch.device, strict_param_budget: int) -> Lo
     )
 
 
-def choose_action_pos(model: Any, seat_obs: dict[str, Any], device: torch.device) -> tuple[int, float]:
+def choose_action_pos(model: Any, seat_obs: dict[str, Any], device: torch.device) -> tuple[int, float, float]:
     legal = seat_obs.get("legal_actions", [])
     if not legal:
-        return 0, 0.0
+        return 0, 0.0, 0.0
 
     tensors = obs_to_tensors(seat_obs)
     tensors = tensor_to_device(tensors, device)
     with torch.no_grad():
-        logits, _, _, _ = model(tensors)
+        logits, _, pts_pred, _ = model(tensors)
         logits = logits[0, : len(legal)]
         probs = F.softmax(logits, dim=-1)
         pos = int(torch.argmax(probs).item())
         conf = float(probs[pos].item())
-    return pos, conf
+        pred_pts = float(pts_pred[0, 0].item() * 420.0)
+    return pos, conf, pred_pts
 
 
 def load_suite(path: Path) -> list[dict[str, Any]]:
@@ -402,7 +452,7 @@ def interactive_fill_specs(specs: list[str | None], entries: list[tuple[str, Pat
 
 def run_case(
     case: dict[str, Any],
-    seat_models: list[LoadedModel | None],
+    seat_policies: list[SeatPolicy],
     device: torch.device,
     log: LogSink,
     ansi: bool = False,
@@ -416,6 +466,9 @@ def run_case(
         step_no = 0
         trick_cards: list[tuple[int, int]] = []
         trick_no = 0
+        bid_total = 0
+        bid_over_pred = 0
+        bid_overreach_sum = 0.0
 
         log.write("")
         log.write(f"=== {case['id']} ===")
@@ -423,9 +476,11 @@ def run_case(
             log.write(f"notes: {case['notes']}")
         if case["seed"] is not None:
             log.write(f"seed: {case['seed']}")
-        if case["hands"] is not None:
+        debug0 = env.observe_debug()
+        start_hands = resolve_start_hands(case["hands"], debug0.get("all_hands", []))
+        if start_hands is not None:
             for s in range(4):
-                log.write(f"P{s} start: {format_hand(case['hands'][s], ansi=ansi)}")
+                log.write(f"P{s} start: {format_hand(start_hands[s], ansi=ansi)}")
 
         while not done and step_no < max_steps:
             step_no += 1
@@ -435,16 +490,29 @@ def run_case(
             if not legal:
                 break
 
-            model_slot = seat_models[active]
-            if model_slot is None:
+            policy = seat_policies[active]
+            if policy.mode == "heuristic":
+                pos = int(env.get_heuristic_action())
+                pos = max(0, min(pos, len(legal) - 1))
+                conf = 1.0
+                pred_pts = 0.0
+            elif policy.mode == "model" and policy.model is not None:
+                pos, conf, pred_pts = choose_action_pos(policy.model.model, seat_obs, device)
+                pos = max(0, min(pos, len(legal) - 1))
+            else:
+                # Deterministic fallback when no policy is configured.
                 pos = 0
                 conf = 0.0
-            else:
-                pos, conf = choose_action_pos(model_slot.model, seat_obs, device)
-                pos = max(0, min(pos, len(legal) - 1))
+                pred_pts = 0.0
             chosen = legal[pos]
             action_idx = int(chosen.get("action_list_idx", pos))
             action_token = int(chosen.get("action_token", 0))
+            if policy.mode == "model" and chosen.get("bid_value") is not None:
+                bid_total += 1
+                bid_value = float(chosen.get("bid_value"))
+                if bid_value > pred_pts:
+                    bid_over_pred += 1
+                    bid_overreach_sum += (bid_value - pred_pts)
             before_pts = (int(obs.get("points_my_team", 0)), int(obs.get("points_opp_team", 0)))
 
             obs, done, info = env.step(action_idx)
@@ -473,10 +541,15 @@ def run_case(
                     trick_cards.clear()
             else:
                 label = format_action_label(chosen, ansi=ansi)
-                log.write(f"A  P{active} {label} (p={conf:.2f})")
+                mode_tag = {"heuristic": "h", "model": "m", "first_legal": "f"}.get(policy.mode, "?")
+                log.write(f"A  P{active} [{mode_tag}] {label} (p={conf:.2f})")
 
         if not done and (not info or "team_points" not in info):
             info = env.run_to_end("heuristic")
+        info = dict(info or {})
+        info["eval_bid_count"] = int(bid_total)
+        info["eval_bid_over_pred_count"] = int(bid_over_pred)
+        info["eval_bid_overreach_sum"] = float(bid_overreach_sum)
         team_points = info.get("team_points", [0, 0]) or [0, 0]
         playing_party = info.get("playing_party")
         log.write(
@@ -506,6 +579,18 @@ def summarize_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     tricks_n = 0
     pair_called = 0
     pair_possible = 0
+    overbid_games = 0
+    overbid_sum = 0.0
+    overbid_bid_sum = 0.0
+    overbid_potential_sum = 0.0
+    taken_games = 0
+    taken_games_won = 0
+    questions_total = 0
+    questions_to_trump = 0
+    questions_no_trump = 0
+    bid_pred_count = 0
+    bid_pred_over_count = 0
+    bid_pred_over_sum = 0.0
     margin_sum = 0.0
     margin_n = 0
     for info in outcomes:
@@ -514,9 +599,29 @@ def summarize_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
             pass_games += 1
         else:
             contracts += 1
-            bid_sum += float(info.get("highest_bid", info.get("game_value", 115)))
-            if bool(info.get("contract_made", info.get("won", False))):
+            bid = float(info.get("highest_bid", info.get("game_value", 115)))
+            bid_sum += bid
+            made_contract = bool(info.get("contract_made", info.get("won", False)))
+            if made_contract:
                 made += 1
+            taken_games += 1
+            if made_contract:
+                taken_games_won += 1
+
+            # Practical upper-bound estimate for contract value:
+            # 140 base + 20 per possible pair for the playing party.
+            pp_est = info.get("playing_possible_pairs")
+            try:
+                pp_est = max(0, int(pp_est))
+                potential_max_bid_est = 140.0 + 20.0 * pp_est
+                over = bid - potential_max_bid_est
+                if over > 0:
+                    overbid_games += 1
+                    overbid_sum += over
+                    overbid_bid_sum += bid
+                    overbid_potential_sum += potential_max_bid_est
+            except Exception:
+                pass
         pt = info.get("playing_party_tricks")
         dt = info.get("defending_party_tricks")
         if pt is not None and dt is not None:
@@ -528,6 +633,23 @@ def summarize_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         if cp is not None and pp is not None:
             pair_called += int(cp)
             pair_possible += int(pp)
+        pq = info.get("playing_questions")
+        if pq is not None:
+            try:
+                q = max(0, int(pq))
+                c = max(0, int(cp)) if cp is not None else 0
+                lead = min(q, c)
+                questions_total += q
+                questions_to_trump += lead
+                questions_no_trump += max(0, q - lead)
+            except Exception:
+                pass
+        try:
+            bid_pred_count += int(info.get("eval_bid_count", 0) or 0)
+            bid_pred_over_count += int(info.get("eval_bid_over_pred_count", 0) or 0)
+            bid_pred_over_sum += float(info.get("eval_bid_overreach_sum", 0.0) or 0.0)
+        except Exception:
+            pass
         playing_party = info.get("playing_party")
         team_points = info.get("team_points", [0, 0]) or [0, 0]
         if playing_party is not None and isinstance(team_points, (list, tuple)) and len(team_points) == 2:
@@ -539,12 +661,29 @@ def summarize_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         "games": n,
         "pass_game_rate": pass_games / max(1, n),
         "contract_made_rate": made / max(1, contracts),
+        "taken_games": taken_games,
+        "taken_games_won": taken_games_won,
+        "taken_game_win_rate": taken_games_won / max(1, taken_games),
         "avg_highest_bid": bid_sum / max(1, contracts),
         "avg_playing_tricks": tricks_play_sum / max(1, tricks_n),
         "avg_defending_tricks": tricks_def_sum / max(1, tricks_n),
         "pair_call_rate": (pair_called / max(1, pair_possible)) if pair_possible > 0 else 0.0,
         "pair_called": pair_called,
         "pair_possible": pair_possible,
+        "overbid_games": overbid_games,
+        "overbid_rate": overbid_games / max(1, contracts),
+        "avg_overbid_amount": overbid_sum / max(1, overbid_games),
+        "avg_overbid_bid": overbid_bid_sum / max(1, overbid_games),
+        "avg_overbid_potential": overbid_potential_sum / max(1, overbid_games),
+        "questions_total": questions_total,
+        "questions_to_trump": questions_to_trump,
+        "questions_no_trump": questions_no_trump,
+        "questions_to_trump_rate": questions_to_trump / max(1, questions_total),
+        "questions_no_trump_rate": questions_no_trump / max(1, questions_total),
+        "bid_over_pred_count": bid_pred_over_count,
+        "bid_pred_count": bid_pred_count,
+        "bid_over_pred_rate": bid_pred_over_count / max(1, bid_pred_count),
+        "avg_bid_over_pred_amount": bid_pred_over_sum / max(1, bid_pred_over_count),
         "avg_playing_margin_points": margin_sum / max(1, margin_n),
     }
 
@@ -556,15 +695,27 @@ def main() -> None:
     p.add_argument("--max-cases", type=int, default=0, help="0 means all")
     p.add_argument("--device", default=("cuda" if torch.cuda.is_available() else "cpu"))
     p.add_argument("--strict-param-budget", type=int, default=28_000_000)
-    p.add_argument("--all-checkpoint", default=None, help="Checkpoint spec for all seats")
-    p.add_argument("--p0", default=None, help="Checkpoint spec for seat P0")
-    p.add_argument("--p1", default=None, help="Checkpoint spec for seat P1")
-    p.add_argument("--p2", default=None, help="Checkpoint spec for seat P2")
-    p.add_argument("--p3", default=None, help="Checkpoint spec for seat P3")
+    p.add_argument("--all-checkpoint", default=None, help="Checkpoint spec for all seats (or 'heuristic')")
+    p.add_argument("--p0", default=None, help="Checkpoint spec for seat P0 (or 'heuristic')")
+    p.add_argument("--p1", default=None, help="Checkpoint spec for seat P1 (or 'heuristic')")
+    p.add_argument("--p2", default=None, help="Checkpoint spec for seat P2 (or 'heuristic')")
+    p.add_argument("--p3", default=None, help="Checkpoint spec for seat P3 (or 'heuristic')")
     p.add_argument("--list-checkpoints", action="store_true")
     p.add_argument("--interactive-select", action="store_true")
     p.add_argument("--echo", action="store_true", help="Also print trick/action log to console")
-    p.add_argument("--ansi", action="store_true", help="Emit ANSI colors in logs")
+    p.add_argument(
+        "--ansi",
+        dest="ansi",
+        action="store_true",
+        default=True,
+        help="Emit ANSI colors in console and file logs (default: on)",
+    )
+    p.add_argument(
+        "--no-ansi",
+        dest="ansi",
+        action="store_false",
+        help="Disable ANSI color escape codes in logs",
+    )
     args = p.parse_args()
 
     entries = discover_checkpoints()
@@ -584,17 +735,24 @@ def main() -> None:
     print(f"[INFO] device={device}")
 
     model_cache: dict[str, LoadedModel] = {}
-    seat_models: list[LoadedModel | None] = []
-    for seat, path in enumerate(resolved_paths):
+    seat_policies: list[SeatPolicy] = []
+    for seat, spec in enumerate(specs):
+        spec_str = "" if spec is None else str(spec).strip().lower()
+        if spec_str in {"heuristic", "heur"}:
+            seat_policies.append(SeatPolicy(mode="heuristic", model=None))
+            print(f"[INFO] P{seat}: heuristic")
+            continue
+
+        path = resolved_paths[seat]
         if path is None:
-            seat_models.append(None)
+            seat_policies.append(SeatPolicy(mode="first_legal", model=None))
             print(f"[INFO] P{seat}: no checkpoint (fallback first legal action)")
             continue
         key = str(path.resolve())
         if key not in model_cache:
             model_cache[key] = load_model(path, device, strict_param_budget=args.strict_param_budget)
-        seat_models.append(model_cache[key])
         m = model_cache[key]
+        seat_policies.append(SeatPolicy(mode="model", model=m))
         print(
             f"[INFO] P{seat}: {path} | family={m.family} | loaded={m.loaded_tensors} skipped={m.skipped_tensors}"
         )
@@ -615,7 +773,7 @@ def main() -> None:
 
     outcomes: list[dict[str, Any]] = []
     for case in cases:
-        info = run_case(case, seat_models, device=device, log=sink, ansi=args.ansi)
+        info = run_case(case, seat_policies, device=device, log=sink, ansi=args.ansi)
         outcomes.append(info)
 
     summary = summarize_outcomes(outcomes)
@@ -624,6 +782,8 @@ def main() -> None:
     sink.write(
         f"games={summary.get('games', 0)} | "
         f"made={summary.get('contract_made_rate', 0.0):.1%} | "
+        f"taken_won={summary.get('taken_games_won', 0)}/{summary.get('taken_games', 0)} "
+        f"({summary.get('taken_game_win_rate', 0.0):.1%}) | "
         f"pass={summary.get('pass_game_rate', 0.0):.1%} | "
         f"avg_bid={summary.get('avg_highest_bid', 0.0):.1f}"
     )
@@ -632,6 +792,24 @@ def main() -> None:
         f"trump_calls={summary.get('pair_called', 0)}/{summary.get('pair_possible', 0)} "
         f"({summary.get('pair_call_rate', 0.0):.1%}) | "
         f"avg_margin={summary.get('avg_playing_margin_points', 0.0):+.1f}"
+    )
+    sink.write(
+        f"overbid(est=140+20*pairs): games={summary.get('overbid_games', 0)} "
+        f"({summary.get('overbid_rate', 0.0):.1%}) | "
+        f"avg_over={summary.get('avg_overbid_amount', 0.0):.1f} | "
+        f"avg_bid={summary.get('avg_overbid_bid', 0.0):.1f} | "
+        f"avg_potential={summary.get('avg_overbid_potential', 0.0):.1f}"
+    )
+    sink.write(
+        f"questions->trump: {summary.get('questions_to_trump', 0)}/{summary.get('questions_total', 0)} "
+        f"({summary.get('questions_to_trump_rate', 0.0):.1%}) | "
+        f"questions_no_trump: {summary.get('questions_no_trump', 0)} "
+        f"({summary.get('questions_no_trump_rate', 0.0):.1%})"
+    )
+    sink.write(
+        f"bid>pred_pts: {summary.get('bid_over_pred_count', 0)}/{summary.get('bid_pred_count', 0)} "
+        f"({summary.get('bid_over_pred_rate', 0.0):.1%}) | "
+        f"avg_over={summary.get('avg_bid_over_pred_amount', 0.0):.1f}"
     )
 
     out_path.write_text("\n".join(sink.lines) + "\n", encoding="utf-8")

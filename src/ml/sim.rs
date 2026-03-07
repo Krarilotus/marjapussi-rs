@@ -171,16 +171,30 @@ pub fn heuristic_policy() -> PolicyFn {
         }
 
         if is_bidding_action {
-            let mut my_bids = vec![];
-            let mut partner_bids = vec![];
-            let mut current_max = 115;
+            let mut team_bid_count = 0usize;
+            let mut current_max = 115i32;
             let my_seat = game.state.player_at_turn.0;
             let partner_seat = (my_seat + 2) % 4;
+            let mut team_first_jump: Option<i32> = None;
+            let mut partner_first_jump: Option<i32> = None;
 
             for (action, p) in &game.state.bidding_history {
                 if let ActionType::NewBid(val) = action {
-                    if p.0 == my_seat { my_bids.push(*val - current_max); }
-                    if p.0 == partner_seat { partner_bids.push(*val - current_max); }
+                    let jump = *val - current_max;
+                    if p.0 == my_seat {
+                        team_bid_count += 1;
+                        if team_first_jump.is_none() {
+                            team_first_jump = Some(jump);
+                        }
+                    } else if p.0 == partner_seat {
+                        team_bid_count += 1;
+                        if team_first_jump.is_none() {
+                            team_first_jump = Some(jump);
+                        }
+                        if partner_first_jump.is_none() {
+                            partner_first_jump = Some(jump);
+                        }
+                    }
                     current_max = *val;
                 }
             }
@@ -188,105 +202,132 @@ pub fn heuristic_policy() -> PolicyFn {
             let hand = &game.state.players[my_seat as usize].cards;
             use crate::game::cards::{Suit, Value};
             let has_ace = hand.iter().any(|c| c.value == Value::Ace);
-            let mut pair_points = 0;
-            let mut halves = 0;
-            
+            let mut ace_count = 0i32;
+            let mut ten_count = 0i32;
+            let mut unmatched_halves = 0i32;
+            let mut small_pair_count = 0i32;
+            let mut big_pair_count = 0i32;
+            let mut pair_points = 0i32;
+
+            for c in hand {
+                if c.value == Value::Ace {
+                    ace_count += 1;
+                }
+                if c.value == Value::Ten {
+                    ten_count += 1;
+                }
+            }
+
             for &suit in &[Suit::Acorns, Suit::Green, Suit::Bells, Suit::Red] {
                 let has_king = hand.iter().any(|c| c.suit == suit && c.value == Value::King);
                 let has_ober = hand.iter().any(|c| c.suit == suit && c.value == Value::Ober);
                 if has_king && has_ober {
-                    pair_points += match suit {
+                    let suit_pair_points = match suit {
                         Suit::Red => 100,
                         Suit::Bells => 80,
                         Suit::Acorns => 60,
                         Suit::Green => 40,
                     };
+                    pair_points += suit_pair_points;
+                    if matches!(suit, Suit::Red | Suit::Bells) {
+                        big_pair_count += 1;
+                    } else {
+                        small_pair_count += 1;
+                    }
                 } else if has_king || has_ober {
-                    halves += 1;
+                    unmatched_halves += 1;
                 }
             }
 
-            let partner_first_jump = partner_bids.first().copied();
-            let partner_second_jump = partner_bids.get(1).copied();
+            let has_small_pair = small_pair_count > 0;
+            let has_big_pair = big_pair_count > 0;
+            let has_pair = has_small_pair || has_big_pair;
+            let own_pair_count = small_pair_count + big_pair_count;
 
-            let partner_has_ace = partner_first_jump == Some(5);
-            let partner_indicated_pair = partner_first_jump == Some(10) || partner_first_jump == Some(15);
-            let partner_indicated_big_pair = partner_first_jump == Some(15);
-            let partner_indicated_two_halves = partner_second_jump == Some(5);
-            let partner_indicated_three_halves = partner_first_jump == Some(10); 
-
-            let mut deductive_pair_points = pair_points;
-
-            if pair_points == 0 {
-                // Deductive Inference: We have no pairs, but can we mathematically guarantee a shared pair?
-                if partner_indicated_big_pair {
-                    deductive_pair_points = 80;
-                } else if partner_indicated_pair {
-                    deductive_pair_points = 40; 
-                } else if partner_indicated_two_halves && halves >= 3 {
-                    // We hold 3 halves. Partner indicated 2 halves. 3 + 2 = 5 cards for 4 suits -> Guaranteed Marriage overlap!
-                    deductive_pair_points = 40;
-                } else if partner_indicated_three_halves && halves >= 2 {
-                    // We hold 2 halves. Partner indicated 3 halves. 3 + 2 = 5 cards for 4 suits -> Guaranteed Marriage overlap!
-                    deductive_pair_points = 40;
+            // Requested strict first/second team bidding protocol.
+            let mut desired_step: Option<i32> = None;
+            if team_bid_count == 0 {
+                if has_ace {
+                    // First bidder of team with ace always starts +5.
+                    desired_step = Some(5);
+                } else if has_big_pair {
+                    desired_step = Some(15);
+                } else if has_small_pair || unmatched_halves >= 3 {
+                    desired_step = Some(10);
+                }
+            } else if team_bid_count == 1 {
+                // Team second bid: ace-info bid no longer applies if team already opened +5.
+                let first_was_ace_signal = team_first_jump == Some(5);
+                if has_big_pair {
+                    desired_step = Some(15);
+                } else if has_small_pair || unmatched_halves >= 3 {
+                    desired_step = Some(10);
+                } else if first_was_ace_signal && unmatched_halves >= 2 {
+                    desired_step = Some(5);
                 }
             } else {
-                // If we also hold a pair, dynamically combine our known pair points.
-                if partner_indicated_big_pair {
-                    deductive_pair_points += 80;
-                } else if partner_indicated_pair {
-                    deductive_pair_points += 40;
+                // Later rounds: continue only in conservative +5 steps with clear own strength.
+                if has_ace || has_pair || unmatched_halves >= 2 {
+                    desired_step = Some(5);
                 }
             }
 
-            let mut max_willing_bid = 140;
+            // Strict >140 gates from partner inference and team structure.
+            let partner_signaled_10 = partner_first_jump == Some(10);
+            let partner_signaled_15 = partner_first_jump == Some(15);
+            let partner_signaled_ace = partner_first_jump == Some(5);
+            let team_opened_with_ace_step = team_first_jump == Some(5);
+            let team_has_ace_signal = has_ace || partner_signaled_ace || team_opened_with_ace_step;
 
-            if !has_ace && !partner_has_ace {
-                // strict Ace-gate: If neither player holds an Ace, they must instantly pass.
-                // It is extremely dangerous to play a game without holding at least one Ace.
-                max_willing_bid = 115;
-            } else {
-                if deductive_pair_points > 0 {
-                    // Extend comfort zone using the combined guaranteed team pair values
-                    max_willing_bid += (deductive_pair_points as f32 * 0.4) as i32;
-                }
-                if has_ace || partner_has_ace {
-                    max_willing_bid += 10;
-                }
+            // Partner opened +10 and we have at least 2 unmatched halves.
+            let inferred_pair_from_10 = partner_signaled_10 && unmatched_halves >= 2;
+            // Partner opened +15 guarantees pair info.
+            let inferred_pair_from_15 = partner_signaled_15;
+            // Team opened +5 on ace and partner also showed +5, while we have strong own support.
+            let inferred_from_double_five_with_strength =
+                team_opened_with_ace_step
+                    && partner_signaled_ace
+                    && (has_pair || unmatched_halves >= 3);
+            // No-ace exception: only allow >140 with stronger pair certainty.
+            let inferred_two_pairs_without_ace =
+                !team_has_ace_signal && own_pair_count >= 1 && partner_signaled_10 && unmatched_halves >= 1;
+
+            let allow_over_140 = inferred_pair_from_15
+                || inferred_pair_from_10
+                || inferred_from_double_five_with_strength
+                || inferred_two_pairs_without_ace;
+
+            // Cautious hand-value estimate:
+            // base + own standing-card strength + half of pair value, capped to 200.
+            let king_count = hand.iter().filter(|c| c.value == Value::King).count() as i32;
+            let ober_count = hand.iter().filter(|c| c.value == Value::Ober).count() as i32;
+            let own_standing_est = ace_count * 12 + ten_count * 9 + king_count * 6 + ober_count * 4 + unmatched_halves * 2;
+            let mut estimated_value = 115 + own_standing_est + (pair_points / 2);
+            if partner_signaled_15 {
+                estimated_value += 20;
+            } else if partner_signaled_10 {
+                estimated_value += 10;
             }
+            estimated_value = estimated_value.clamp(115, 200);
 
-            if max_willing_bid > 200 {
-                max_willing_bid = 200;
+            let mut max_willing_bid = estimated_value;
+            if !allow_over_140 {
+                max_willing_bid = max_willing_bid.min(140);
             }
-
-            let mut desired_step = None;
-            let my_bid_count = my_bids.len();
-
-            if my_bid_count == 0 {
-                // 1st Step Info Signal
-                if pair_points >= 80 { desired_step = Some(15); }
-                else if pair_points > 0 || halves >= 3 { desired_step = Some(10); }
-                else if has_ace || halves >= 2 { desired_step = Some(5); }
-            } else if my_bid_count == 1 {
-                // 2nd Step Info Signal (e.g. signaling our 2 halves via a second consecutive +5 bid)
-                if my_bids[0] == 5 && halves >= 2 && !has_ace { desired_step = Some(5); }
-                else { desired_step = Some(5); }
-            } else {
-                // All subsequent steps: Only +5 padding to secure the bid logic
-                desired_step = Some(5);
+            if !team_has_ace_signal && !inferred_two_pairs_without_ace {
+                max_willing_bid = 140;
             }
 
             let mut chosen_action = None;
             if let Some(step) = desired_step {
                 let target_bid = current_max + step;
                 if target_bid <= max_willing_bid {
-                    if let Some(idx) = actions.iter().position(|a| match a.action_type { ActionType::NewBid(v) => v == target_bid, _ => false }) {
-                        chosen_action = Some(idx);
-                    } else if let Some(idx) = actions.iter().position(|a| match a.action_type { ActionType::NewBid(v) => v <= max_willing_bid, _ => false }) {
+                    if let Some(idx) = actions.iter().position(|a| matches!(a.action_type, ActionType::NewBid(v) if v == target_bid)) {
                         chosen_action = Some(idx);
                     }
                 }
             }
+
             if chosen_action.is_none() {
                 chosen_action = actions.iter().position(|a| matches!(a.action_type, ActionType::StopBidding));
             }
@@ -304,12 +345,53 @@ pub fn heuristic_policy() -> PolicyFn {
             let my_seat = game.state.player_at_turn.0;
             let hand = &game.state.players[my_seat as usize].cards;
             let is_forth = matches!(game.state.phase, GamePhase::PassingForth);
-            
-            let mut best_score = -10000;
+            let partner_seat = (my_seat + 2) % 4;
+            let incoming_from_partner: Vec<crate::game::cards::Card> = if is_forth {
+                vec![]
+            } else {
+                game.all_events
+                    .iter()
+                    .rev()
+                    .find_map(|ev| match &ev.last_action.action_type {
+                        ActionType::Pass(cards) => Some(cards.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            };
+            let mut hand_suits = [0i32; 4];
+            for c in hand {
+                hand_suits[c.suit.clone() as usize] += 1;
+            }
+            let num_suits_before = hand_suits.iter().filter(|&&c| c > 0).count() as i32;
+
+            // Extract first jump info from bidding to estimate what was already communicated.
+            let mut current_bid = 115i32;
+            let mut my_first_jump: Option<i32> = None;
+            let mut partner_first_jump: Option<i32> = None;
+            for (action, p) in &game.state.bidding_history {
+                if let ActionType::NewBid(v) = action {
+                    let jump = *v - current_bid;
+                    if p.0 == my_seat && my_first_jump.is_none() {
+                        my_first_jump = Some(jump);
+                    } else if p.0 == partner_seat && partner_first_jump.is_none() {
+                        partner_first_jump = Some(jump);
+                    }
+                    current_bid = *v;
+                }
+            }
+            let communicated_ace = my_first_jump == Some(5);
+            let partner_communicated_ace = partner_first_jump == Some(5);
+
+            let mut incoming_suits = [0i32; 4];
+            for c in &incoming_from_partner {
+                incoming_suits[c.suit.clone() as usize] += 1;
+            }
+             
+            let mut best_score = i32::MIN;
             let mut best_idx = passing_actions[0].0;
 
             for &(idx, passed_cards) in &passing_actions {
-                let mut score = 0;
+                let mut score = 0i32;
                 let mut kept = hand.clone();
                 for c in passed_cards {
                     if let Some(pos) = kept.iter().position(|x| x == c) {
@@ -317,66 +399,111 @@ pub fn heuristic_policy() -> PolicyFn {
                     }
                 }
                 
-                let mut suits_kept = [0; 4];
+                let mut suits_kept = [0i32; 4];
                 for c in &kept {
                     suits_kept[c.suit.clone() as usize] += 1;
                 }
-                let num_suits = suits_kept.iter().filter(|&&c| c > 0).count();
+                let num_suits = suits_kept.iter().filter(|&&c| c > 0).count() as i32;
+                let cut_suit_count = (0..4)
+                    .filter(|&s| hand_suits[s] > 0 && suits_kept[s] == 0)
+                    .count() as i32;
                 
                 use crate::game::cards::{Suit, Value};
                 
                 if is_forth {
-                    // 1. Pass to leave max 2 suits
-                    if num_suits <= 2 { score += 100; }
-                    else if num_suits == 3 { score += 50; }
-                    
-                    // 2. Pass unknown valuable cards or Ace
-                    for c in passed_cards {
-                        if c.value == Value::Ace || c.value == Value::Ten { score += 10; }
+                    // Primary: shape hand to 2 suits.
+                    if num_suits <= 2 { score += 450; }
+                    else if num_suits == 3 { score += 120; }
+                    else { score -= 180; }
+                    score += cut_suit_count * 140;
+                    if num_suits > 2 {
+                        score -= (num_suits - 2) * 120;
                     }
-                    
-                    // 3. Never pass full pairs
-                    for &suit in &[Suit::Acorns, Suit::Green, Suit::Bells, Suit::Red] {
-                        let has_king_kept = kept.iter().any(|c| c.suit == suit && c.value == Value::King);
-                        let has_ober_kept = kept.iter().any(|c| c.suit == suit && c.value == Value::Ober);
-                        if has_king_kept && has_ober_kept {
-                            score += 50; // reward keeping full pairs
+
+                    // Secondary: pass high-value cards not explicitly communicated yet.
+                    for c in passed_cards {
+                        match c.value {
+                            Value::Ace => {
+                                score += if communicated_ace { 20 } else { 55 };
+                                if !partner_communicated_ace {
+                                    score += 10;
+                                }
+                            }
+                            Value::Ten => score += 18,
+                            Value::King | Value::Ober => score += 10,
+                            _ => {}
                         }
-                        
+                    }
+
+                    // Strongly avoid splitting own pairs while passing forth.
+                    for &suit in &[Suit::Acorns, Suit::Green, Suit::Bells, Suit::Red] {
                         let had_king = hand.iter().any(|c| c.suit == suit && c.value == Value::King);
                         let had_ober = hand.iter().any(|c| c.suit == suit && c.value == Value::Ober);
                         if had_king && had_ober {
-                            // Penalty for breaking pair
                             let passed_king = passed_cards.iter().any(|c| c.suit == suit && c.value == Value::King);
                             let passed_ober = passed_cards.iter().any(|c| c.suit == suit && c.value == Value::Ober);
                             if passed_king || passed_ober {
-                                score -= 200;
+                                score -= 280;
                             }
                         }
                     }
                 } else {
-                    // Backpasser
-                    // 1. Keep at least one suit that won't become trump
-                    if num_suits >= 2 { score += 50; }
-                    
-                    // 2. Maintain ability to call trump: keep pairs
+                    // Back-passer: avoid bouncing back same cards.
+                    let immediate_return_count = passed_cards
+                        .iter()
+                        .filter(|c| incoming_from_partner.contains(c))
+                        .count() as i32;
+                    score -= immediate_return_count * 180;
+
+                    // Also avoid passing back incoming suit colors in general.
+                    for c in passed_cards {
+                        if incoming_suits[c.suit.clone() as usize] > 0 {
+                            score -= 35;
+                        }
+                    }
+
+                    // Prefer trimming to 2 suits and actually cutting one suit.
+                    if num_suits <= 2 { score += 260; }
+                    else if num_suits == 3 { score += 80; }
+                    else { score -= 120; }
+                    score += cut_suit_count * 100;
+                    if num_suits_before - num_suits >= 1 {
+                        score += 60;
+                    }
+
+                    // Keep pair/trump potential and do not split pairs.
+                    let mut kept_pair_count = 0i32;
                     for &suit in &[Suit::Acorns, Suit::Green, Suit::Bells, Suit::Red] {
+                        let had_king = hand.iter().any(|c| c.suit == suit && c.value == Value::King);
+                        let had_ober = hand.iter().any(|c| c.suit == suit && c.value == Value::Ober);
                         let has_king_kept = kept.iter().any(|c| c.suit == suit && c.value == Value::King);
                         let has_ober_kept = kept.iter().any(|c| c.suit == suit && c.value == Value::Ober);
                         if has_king_kept && has_ober_kept {
-                            score += 100; 
+                            kept_pair_count += 1;
+                        }
+                        if had_king && had_ober && !(has_king_kept && has_ober_kept) {
+                            score -= 260;
                         }
                     }
-                    
-                    // 3. Pass back a full suit (cards of same suit)
-                    let mut passed_suits = [0; 4];
-                    for c in passed_cards {
-                        passed_suits[c.suit.clone() as usize] += 1;
-                    }
-                    if passed_suits.iter().any(|&c| c >= 3) {
-                        score += 80;
-                    } else if passed_suits.iter().any(|&c| c >= 2) {
-                        score += 30;
+                    score += kept_pair_count * 110;
+
+                    // Standing-card shaping: keep at least one ace and preserve tops.
+                    let aces_kept = kept.iter().filter(|c| c.value == Value::Ace).count() as i32;
+                    let tens_kept = kept.iter().filter(|c| c.value == Value::Ten).count() as i32;
+                    if aces_kept >= 1 { score += 90; } else { score -= 150; }
+                    score += aces_kept * 25 + tens_kept * 12;
+
+                    // If we pass an ace back, keep a low card in same suit for control.
+                    for ace in passed_cards.iter().filter(|c| c.value == Value::Ace) {
+                        let has_low_same_suit = kept.iter().any(|c| {
+                            c.suit == ace.suit
+                                && matches!(c.value, Value::Six | Value::Seven | Value::Eight | Value::Nine)
+                        });
+                        if has_low_same_suit {
+                            score += 20;
+                        } else {
+                            score -= 60;
+                        }
                     }
                 }
                 

@@ -58,7 +58,8 @@ def resolve_ml_server_binary(binary_path: Optional[str | Path] = None) -> Path:
 
 def _send(proc: subprocess.Popen, msg: dict) -> dict:
     try:
-        line = json.dumps(msg) + "\n"
+        # Compact JSON reduces IPC payload size and parse overhead on both ends.
+        line = json.dumps(msg, separators=(",", ":")) + "\n"
         proc.stdin.write(line)
         proc.stdin.flush()
         response = proc.stdout.readline()

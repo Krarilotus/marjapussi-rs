@@ -5,7 +5,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from eval_fixed_deals import normalize_fixed_hands, parse_card_spec, summarize_outcomes
+from eval_fixed_deals import (
+    normalize_fixed_hands,
+    parse_card_spec,
+    resolve_start_hands,
+    summarize_outcomes,
+)
 
 
 class EvalFixedDealsHelpersTest(unittest.TestCase):
@@ -48,11 +53,12 @@ class EvalFixedDealsHelpersTest(unittest.TestCase):
                 {
                     "no_one_played": False,
                     "contract_made": True,
-                    "highest_bid": 140,
+                    "highest_bid": 200,
                     "playing_party_tricks": 6,
                     "defending_party_tricks": 3,
                     "playing_called_trumps": 2,
                     "playing_possible_pairs": 3,
+                    "playing_questions": 3,
                     "playing_party": 0,
                     "team_points": [160, 80],
                 },
@@ -67,6 +73,33 @@ class EvalFixedDealsHelpersTest(unittest.TestCase):
         self.assertAlmostEqual(out["pass_game_rate"], 0.5)
         self.assertAlmostEqual(out["contract_made_rate"], 1.0)
         self.assertAlmostEqual(out["pair_call_rate"], 2 / 3)
+        self.assertEqual(out["taken_games"], 1)
+        self.assertEqual(out["taken_games_won"], 1)
+        self.assertAlmostEqual(out["taken_game_win_rate"], 1.0)
+        self.assertEqual(out["overbid_games"], 0)
+        self.assertEqual(out["questions_to_trump"], 2)
+        self.assertEqual(out["questions_no_trump"], 1)
+
+    def test_resolve_start_hands_prefers_case_hands(self):
+        case_hands = [
+            list(range(0, 9)),
+            list(range(9, 18)),
+            list(range(18, 27)),
+            list(range(27, 36)),
+        ]
+        debug_hands = [[0] * 9, [1] * 9, [2] * 9, [3] * 9]
+        out = resolve_start_hands(case_hands, debug_hands)
+        self.assertEqual(out, case_hands)
+
+    def test_resolve_start_hands_uses_debug_when_case_missing(self):
+        debug_hands = [
+            list(range(0, 9)),
+            list(range(9, 18)),
+            list(range(18, 27)),
+            list(range(27, 36)),
+        ]
+        out = resolve_start_hands(None, debug_hands)
+        self.assertEqual(out, debug_hands)
 
 
 if __name__ == "__main__":
