@@ -18,7 +18,7 @@ Recommended starting point:
 
 from __future__ import annotations
 
-import argparse, collections, json, math, os, random, sys, threading, time, warnings, uuid
+import argparse, collections, json, math, os, random, re, sys, threading, time, warnings, uuid
 import ctypes
 from typing import Any
 
@@ -137,7 +137,40 @@ def _is_info_action(legal: list[dict]) -> bool:
     return any(la.get("action_token") in (44, 45, 46, 47, 48, 49, 50) for la in legal)
 
 
+def _is_advantage_target_action(
+    start_trick: int | None,
+    trick_no: int,
+    *,
+    is_bid: bool,
+    is_pass: bool,
+    is_info: bool,
+) -> bool:
+    """
+    Decide whether the current decision should receive counterfactual targeting.
+
+    Curriculum phases keep their narrow targets, but full-game training expands
+    targeting to the strategic actions with the worst credit-assignment:
+    bidding, passing, and information exchange.
+    """
+    if start_trick == -1:
+        return is_bid
+    if start_trick == 0:
+        return is_pass
+    if start_trick is None:
+        return is_bid or is_pass or is_info
+    return ((trick_no == start_trick) and not is_bid and not is_pass) or is_info
+
+
 PHASE_ORDER = ("trick", "passing", "bidding_prop", "full_game")
+_PHASE_FILE_TOKEN_TO_PHASE = {
+    "gameplay": "trick",
+    "trick": "trick",
+    "passing": "passing",
+    "bidding": "bidding_prop",
+    "bidding_prop": "bidding_prop",
+    "full_game": "full_game",
+}
+_PHASE_ROUND_FILE_RE = re.compile(r"^phase_([a-z_]+)_complete_round_(\d+)\.pt$")
 
 
 def _build_phase_plan(
@@ -187,8 +220,8 @@ def _build_phase_plan(
 
 def _phase_start_trick(phase: str, phase_local_round: int) -> int | None:
     if phase == "trick":
-        # Sweep across all 9 trick indices to cover trick-play space.
-        return 1 + ((max(1, int(phase_local_round)) - 1) % 9)
+        # Backward curriculum sweep across all 9 trick indices: 9 -> 1.
+        return 9 - ((max(1, int(phase_local_round)) - 1) % 9)
     if phase == "passing":
         return 0
     if phase == "bidding_prop":
@@ -201,6 +234,80 @@ def _phase_override(default_value: int, override_value: int) -> int:
     if ov > 0:
         return ov
     return int(default_value)
+
+
+def _phase_completion_rounds(ckpt_dir: Path) -> dict[str, int]:
+    """
+    Best-effort discovery of completed curriculum phases and their completion
+    rounds from checkpoint artifacts.
+    """
+    rounds: dict[str, int] = {}
+    if not ckpt_dir.exists():
+        return rounds
+    for p in ckpt_dir.glob("phase_*_complete_round_*.pt"):
+        m = _PHASE_ROUND_FILE_RE.match(p.name)
+        if not m:
+            continue
+        phase = _PHASE_FILE_TOKEN_TO_PHASE.get(m.group(1))
+        if phase is None:
+            continue
+        r = int(m.group(2))
+        prev = rounds.get(phase, 0)
+        if r > prev:
+            rounds[phase] = r
+    return rounds
+
+
+def _initial_phase_state(
+    *,
+    start_round: int,
+    phase_plan: dict[str, int],
+    ckpt_dir: Path,
+) -> tuple[int, int, set[str]]:
+    """
+    Reconstruct phase pointer for resumed runs.
+
+    Uses explicit phase-completion checkpoints when available (captures early
+    transitions), otherwise falls back to deterministic plan position.
+    """
+    completed_rounds = max(0, int(start_round))
+    completion_rounds = _phase_completion_rounds(ckpt_dir)
+    phase_end_logged: set[str] = set()
+
+    # 1) Preferred: infer from explicit phase completion markers.
+    if completion_rounds:
+        phase_idx = 0
+        prev_completion_round = 0
+        for idx, phase in enumerate(PHASE_ORDER[:-1]):
+            completed_at = int(completion_rounds.get(phase, 0))
+            if completed_at > 0 and completed_at <= completed_rounds:
+                phase_end_logged.add(phase)
+                phase_idx = idx + 1
+                prev_completion_round = completed_at
+                continue
+            break
+        phase_local_round = max(0, completed_rounds - prev_completion_round)
+        return phase_idx, phase_local_round, phase_end_logged
+
+    # 2) Fallback: deterministic position within configured phase plan.
+    remaining = completed_rounds
+    phase_idx = 0
+    phase_local_round = 0
+    for idx, phase in enumerate(PHASE_ORDER):
+        max_rounds = int(phase_plan.get(phase, 0))
+        if idx < (len(PHASE_ORDER) - 1) and max_rounds <= 0:
+            phase_end_logged.add(phase)
+            phase_idx = idx + 1
+            continue
+        if idx < (len(PHASE_ORDER) - 1) and max_rounds > 0 and remaining >= max_rounds:
+            remaining -= max_rounds
+            phase_end_logged.add(phase)
+            phase_idx = idx + 1
+            continue
+        phase_idx = idx
+        phase_local_round = max(0, remaining)
+        break
+    return phase_idx, phase_local_round, phase_end_logged
 
 
 def _normalize_signal(values: list[float]) -> list[float]:
@@ -662,15 +769,20 @@ def run_episode(
     max_pass_adv_calls_per_episode: int = 4,
     max_info_adv_calls_per_episode: int = 2,
     reward_cfg: RewardConfig = RewardConfig(),
+    train_phase: str = "full_game",
+    failed_contract_penalty_base: float = 0.0,
+    failed_contract_penalty_bid_scale: float = 0.0,
+    ask_without_trump_penalty_weight: float = 0.0,
     full_game_meta_margin_weight: float = 0.20,
     full_game_meta_margin_clip: float = 1.0,
+    all_model_seats: bool = True,
     episode_metrics_out: dict[str, Any] | None = None,
 ) -> list[Transition]:
     """
     Play one complete game and return training transitions for POV-controlled decisions only.
     stage 0: heuristic actions for POV (bootstrap data collection)
     stage 1: model actions for POV
-    Non-POV seats always use heuristic policy to avoid hidden-information leakage.
+    If all_model_seats is True, non-POV seats also use the model from their own POV.
     """
     transitions: list[Transition] = []
     pending: Transition | None = None
@@ -705,6 +817,7 @@ def run_episode(
             is_pass = _is_passing_action(legal)
             is_info = _is_info_action(legal)
             action_pos = 0
+            chosen_action_list_idx = 0
 
             if controls_turn:
                 t_before = obs_to_tensors(obs, env.labels)
@@ -726,12 +839,13 @@ def run_episode(
                 advantage = 0.0
                 if len(legal) > 1 and mc_rollouts > 0:
                     trick_no = obs.get("trick_number", 1)
-                    if start_trick == -1:
-                        is_target = is_bid
-                    elif start_trick == 0:
-                        is_target = is_pass
-                    else:
-                        is_target = ((trick_no == start_trick) and not is_bid and not is_pass) or is_info
+                    is_target = _is_advantage_target_action(
+                        start_trick,
+                        trick_no,
+                        is_bid=is_bid,
+                        is_pass=is_pass,
+                        is_info=is_info,
+                    )
 
                     should_query = False
                     if is_pass:
@@ -778,11 +892,30 @@ def run_episode(
                     is_forced=force_heuristic_turn,
                     imm_r=0.0,
                 )
+                chosen_action_list_idx = int(legal[action_pos]["action_list_idx"])
             else:
-                action_pos = env.get_heuristic_action() if len(legal) > 1 else 0
+                if stage >= 1 and all_model_seats and len(legal) > 1:
+                    active_rel = int(obs.get("active_player", 0)) % 4
+                    active_abs = (int(env.pov) + active_rel) % 4
+                    seat_obs = env.observe_pov(active_abs)
+                    seat_legal = seat_obs.get("legal_actions", [])
+                    if seat_legal:
+                        seat_t = obs_to_tensors(seat_obs, env.labels)
+                        seat_action_pos, _seat_val, _seat_logp = inference_server.infer(seat_t)
+                        seat_action_pos = min(seat_action_pos, len(seat_legal) - 1)
+                        # action_list_idx is global in the engine, so no remap/search is needed.
+                        chosen_action_list_idx = int(seat_legal[seat_action_pos]["action_list_idx"])
+                    else:
+                        action_pos = env.get_heuristic_action() if len(legal) > 1 else 0
+                        action_pos = min(action_pos, len(legal) - 1)
+                        chosen_action_list_idx = int(legal[action_pos]["action_list_idx"])
+                else:
+                    action_pos = env.get_heuristic_action() if len(legal) > 1 else 0
+                    action_pos = min(action_pos, len(legal) - 1)
+                    chosen_action_list_idx = int(legal[action_pos]["action_list_idx"])
 
             prev_obs = obs
-            obs, _, info = env.step(legal[action_pos]["action_list_idx"])
+            obs, _, info = env.step(chosen_action_list_idx)
             t_step_total += time.perf_counter() - t0_step
 
             # Reward from POV perspective; accumulate until next POV decision.
@@ -822,6 +955,43 @@ def run_episode(
             tricks_party_1 = 0
             playing_party = None
 
+        episode_metrics = _extract_episode_outcome_metrics(info if isinstance(info, dict) else {})
+        applied_failed_contract_penalty = 0.0
+        applied_ask_without_trump_penalty = 0.0
+        if train_phase in ("bidding_prop", "full_game") and playing_party is not None:
+            playing_party_int = int(playing_party) % 2
+            contract_made = episode_metrics.get("contract_made")
+            try:
+                highest_bid = max(115, int(episode_metrics.get("highest_bid", 115)))
+            except Exception:
+                highest_bid = 115
+            if contract_made is False:
+                extra_fail_penalty = float(failed_contract_penalty_base) + (
+                    float(failed_contract_penalty_bid_scale) * (highest_bid / max(1e-6, reward_cfg.points_normalizer))
+                )
+                if extra_fail_penalty > 0.0:
+                    if pov_party == playing_party_int:
+                        terminal_diff -= extra_fail_penalty
+                    else:
+                        terminal_diff += extra_fail_penalty
+                    applied_failed_contract_penalty = extra_fail_penalty
+
+            if ask_without_trump_penalty_weight > 0.0:
+                try:
+                    q = max(0, int(episode_metrics.get("playing_questions") or 0))
+                    c = max(0, int(episode_metrics.get("called_trumps") or 0))
+                except Exception:
+                    q, c = 0, 0
+                if q > 0:
+                    wasted_ratio = max(0.0, float(q - c) / float(max(1, q)))
+                    ask_penalty = float(ask_without_trump_penalty_weight) * wasted_ratio
+                    if ask_penalty > 0.0:
+                        if pov_party == playing_party_int:
+                            terminal_diff -= ask_penalty
+                        else:
+                            terminal_diff += ask_penalty
+                        applied_ask_without_trump_penalty = ask_penalty
+
         meta_signal = _compose_meta_signal(
             contract_outcome=terminal_diff,
             pts_my_norm=pts_my_norm,
@@ -829,11 +999,11 @@ def run_episode(
             margin_weight=full_game_meta_margin_weight,
             margin_clip=full_game_meta_margin_clip,
         )
-
-        episode_metrics = _extract_episode_outcome_metrics(info if isinstance(info, dict) else {})
         if episode_metrics_out is not None:
             episode_metrics_out.clear()
             episode_metrics_out.update(episode_metrics)
+            episode_metrics_out["applied_failed_contract_penalty"] = float(applied_failed_contract_penalty)
+            episode_metrics_out["applied_ask_without_trump_penalty"] = float(applied_ask_without_trump_penalty)
 
         if not transitions:
             return []
@@ -963,9 +1133,28 @@ def collate(transitions: list[Transition], device: str):
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
-def eval_deterministic(model, device, n=100, reward_cfg: RewardConfig = RewardConfig()) -> dict:
+def eval_deterministic(
+    model,
+    device,
+    n=100,
+    reward_cfg: RewardConfig = RewardConfig(),
+    *,
+    bid_soft_cap_weight: float = 0.0,
+    bid_soft_cap_margin: float = 0.0,
+    stop_bid_penalty_weight: float = 0.0,
+    stop_bid_margin: float = 0.0,
+) -> dict:
     model.eval()
-    server = BatchInferenceServer(model, device, max_batch=1, greedy=True) # Serial deterministic eval
+    server = BatchInferenceServer(
+        model,
+        device,
+        max_batch=1,
+        greedy=True,
+        bid_soft_cap_weight=bid_soft_cap_weight,
+        bid_soft_cap_margin=bid_soft_cap_margin,
+        stop_bid_penalty_weight=stop_bid_penalty_weight,
+        stop_bid_margin=stop_bid_margin,
+    )  # Serial deterministic eval
     env = MarjapussiEnv(include_labels=False)
     
     total_pts_diff = 0.0
@@ -1043,9 +1232,20 @@ def train_online(
     hidden_known_weight: float = 0.5,
     hidden_exclusive_weight: float = 0.5,
     forced_imitation_weight: float = 0.5,
-    forced_imitation_bid_mult: float = 1.5,
-    forced_imitation_pass_mult: float = 2.5,
-    forced_imitation_decay_rounds: int = 128,
+    forced_imitation_bid_mult: float = 2.5,
+    forced_imitation_pass_mult: float = 3.5,
+    forced_imitation_decay_rounds: int = 384,
+    all_model_seats: bool = True,
+    bid_overreach_weight: float = 0.20,
+    bid_overreach_weight_bidding: float = 0.35,
+    bid_overreach_weight_full_game: float = 0.30,
+    bid_soft_cap_weight: float = 1.20,
+    bid_soft_cap_margin: float = 5.0,
+    stop_bid_penalty_weight: float = 0.0,
+    stop_bid_margin: float = 0.0,
+    failed_contract_penalty_base: float = 0.15,
+    failed_contract_penalty_bid_scale: float = 0.25,
+    ask_without_trump_penalty_weight: float = 0.12,
     full_game_meta_adv_weight: float = 0.85,
     bidding_meta_adv_weight: float = 0.35,
     full_game_meta_margin_weight: float = 0.20,
@@ -1057,7 +1257,7 @@ def train_online(
     series_diff_weight: float = 1.0,
     series_blend_weight_full_game: float = 0.70,
     series_blend_weight_bidding: float = 0.35,
-    trick_phase_frac: float = 0.50,
+    trick_phase_frac: float = 0.40,
     passing_phase_frac: float = 0.05,
     bidding_phase_frac: float = 0.05,
     phase_trick_games_per_round: int = 0,
@@ -1074,11 +1274,18 @@ def train_online(
     named_checkpoint: str | None = None,
     points_normalizer: float = 420.0,
     passgame_base_reward: float = 115.0 / 420.0,
+    passgame_margin_weight: float = 0.25,
+    no_contract_penalty: float = 0.35,
     step_delta_scale: float = 1.0 / 420.0,
     checkpoints_dir: str | Path = DEFAULT_CKPT_DIR,
     runs_dir: str | Path = DEFAULT_RUNS_DIR,
 ):
     configure_torch_runtime(device=device, workers=workers)
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            "device='cuda' requested but CUDA is not available. "
+            "Refusing to continue to avoid silent CPU fallback."
+        )
     use_amp = device.startswith("cuda")
     model, model_meta = create_model(
         model_family=model_family,
@@ -1086,12 +1293,21 @@ def train_online(
         strict_param_budget=strict_param_budget,
     )
     model = model.to(device)
+    if device.startswith("cuda"):
+        param_dev = next(model.parameters()).device.type
+        if param_dev != "cuda":
+            raise RuntimeError(
+                f"Training model is on '{param_dev}', expected CUDA. "
+                "Aborting to avoid silent inference fallback."
+            )
     scaler  = GradScaler("cuda", enabled=use_amp)
     opt     = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched   = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=rounds)
     reward_cfg = RewardConfig(
         points_normalizer=points_normalizer,
         passgame_base_reward=passgame_base_reward,
+        passgame_margin_weight=passgame_margin_weight,
+        no_contract_penalty=no_contract_penalty,
         step_delta_scale=step_delta_scale,
     )
     ckpt_dir = Path(checkpoints_dir)
@@ -1155,6 +1371,18 @@ def train_online(
         f"bid_mult={forced_imitation_bid_mult:.2f}, pass_mult={forced_imitation_pass_mult:.2f}, "
         f"decay_rounds={forced_imitation_decay_rounds}"
     )
+    Log.info(f"Simulation policy: all_model_seats={bool(all_model_seats)}")
+    Log.info(
+        "Bid calibration: "
+        f"overreach(base/bid/full)={bid_overreach_weight:.2f}/{bid_overreach_weight_bidding:.2f}/{bid_overreach_weight_full_game:.2f}, "
+        f"soft_cap_w={bid_soft_cap_weight:.2f}, soft_cap_margin={bid_soft_cap_margin:.1f}, "
+        f"stop_penalty_w={stop_bid_penalty_weight:.2f}, stop_margin={stop_bid_margin:.1f}"
+    )
+    Log.info(
+        "Contract/question penalties: "
+        f"failed_contract(base={failed_contract_penalty_base:.3f}, bid_scale={failed_contract_penalty_bid_scale:.3f}), "
+        f"ask_without_trump={ask_without_trump_penalty_weight:.3f}"
+    )
     Log.info(
         f"Meta advantage blend weights: full_game={full_game_meta_adv_weight:.2f}, "
         f"bidding={bidding_meta_adv_weight:.2f}"
@@ -1174,6 +1402,8 @@ def train_online(
     Log.info(
         f"Reward knobs: points_norm={reward_cfg.points_normalizer:.1f}, "
         f"passgame_base={reward_cfg.passgame_base_reward:.4f}, "
+        f"passgame_margin_w={reward_cfg.passgame_margin_weight:.3f}, "
+        f"no_contract_penalty={reward_cfg.no_contract_penalty:.3f}, "
         f"step_delta_scale={reward_cfg.step_delta_scale:.6f}"
     )
     Log.info(f"Params: {model.param_count():,}\n")
@@ -1187,7 +1417,8 @@ def train_online(
 
     best_diff = -9999.0
     train_start = time.time()
-    total_rounds = max(1, rounds - start_round)
+    total_rounds = max(1, int(rounds))
+    local_total_rounds = max(1, int(rounds - start_round))
     phase_plan = _build_phase_plan(
         total_rounds=total_rounds,
         trick_frac=trick_phase_frac,
@@ -1233,12 +1464,29 @@ def train_online(
             f"patience={phase_loss_patience}, min_delta={phase_loss_min_delta:.4f}, "
             f"min_round_frac={phase_min_rounds_frac:.2f}"
         )
-    phase_idx = 0
-    phase_local_round = 0
+    phase_idx, phase_local_round, phase_end_logged = _initial_phase_state(
+        start_round=start_round,
+        phase_plan=phase_plan,
+        ckpt_dir=ckpt_dir,
+    )
     phase_no_improve = 0
     phase_best_loss = float("inf")
-    phase_end_logged: set[str] = set()
     games_played_total = 0
+    sim_infer_device = device if str(device).startswith("cuda") else "cpu"
+    sim_model, _ = create_model(
+        model_family=model_meta.get("model_family", "parallel_v2"),
+        model_config_path=model_meta.get("model_config_path"),
+        strict_param_budget=strict_param_budget,
+    )
+    sim_model = sim_model.to(sim_infer_device)
+    if device.startswith("cuda"):
+        sim_param_dev = next(sim_model.parameters()).device.type
+        if sim_param_dev != "cuda":
+            raise RuntimeError(
+                f"Simulation model is on '{sim_param_dev}', expected CUDA. "
+                "Aborting to avoid silent simulation CPU fallback."
+            )
+        Log.info(f"Simulation inference device (strict): {sim_infer_device}")
 
     for rnd in range(start_round, rounds):
         t0 = time.time()
@@ -1286,29 +1534,32 @@ def train_online(
         # ── Collect games in parallel via threads ────────────────────────────
         Log.phase(f"Round {rnd+1}/{rounds}: Simulation")
         print(f"\033[94m[SIM]\033[0m Starting simulation with {workers} workers...", flush=True)
-        sim_model, _ = create_model(
-            model_family=model_meta.get("model_family", "parallel_v2"),
-            model_config_path=model_meta.get("model_config_path"),
-            strict_param_budget=strict_param_budget,
-        )
-        sim_model = sim_model.to("cpu")
+        # Reuse a persistent simulation model instance and refresh only weights.
         sim_model.load_state_dict(model.state_dict())
         sim_model.eval()
-        
-        server = BatchInferenceServer(sim_model, "cpu", max_batch=min(workers * 4, 128))
+
+        server = BatchInferenceServer(
+            sim_model,
+            sim_infer_device,
+            max_batch=min(workers * 4, 128),
+            fail_fast=True,
+            bid_soft_cap_weight=(bid_soft_cap_weight if train_phase in ("bidding_prop", "full_game") else 0.0),
+            bid_soft_cap_margin=bid_soft_cap_margin,
+            stop_bid_penalty_weight=(stop_bid_penalty_weight if train_phase in ("bidding_prop", "full_game") else 0.0),
+            stop_bid_margin=stop_bid_margin,
+        )
         pool_envs = EnvPool(workers, include_labels=True)
         all_transitions: list[Transition] = []
 
         # Curriculum/forcing logic
-        progress = local_round / max(1, total_rounds)
+        progress = (rnd + 1) / max(1, total_rounds)
         
         completed_games = 0
         progress_lock = threading.Lock()
 
-        # Do not keep forcing heuristics deep into the full-game phase.
-        force_until = 0.60
-        force_passing = progress < min(force_passing_until_progress, force_until)
-        force_bidding = progress < min(force_bidding_until_progress, force_until)
+        # Respect configured forcing windows from CLI/config.
+        force_passing = progress < float(force_passing_until_progress)
+        force_bidding = progress < float(force_bidding_until_progress)
         
         def collect_one(game_idx):
             env = pool_envs.get()
@@ -1320,6 +1571,11 @@ def train_online(
                                   verbose_timing=(game_idx == 0),
                                   force_heuristic_bidding=force_bidding,
                                   force_heuristic_passing=force_passing,
+                                  train_phase=train_phase,
+                                  failed_contract_penalty_base=failed_contract_penalty_base,
+                                  failed_contract_penalty_bid_scale=failed_contract_penalty_bid_scale,
+                                  ask_without_trump_penalty_weight=ask_without_trump_penalty_weight,
+                                  all_model_seats=all_model_seats,
                                   adv_query_mode=adv_query_mode,
                                   adv_non_target_prob=adv_non_target_prob,
                                   max_adv_calls_per_episode=max_adv_calls_per_episode,
@@ -1447,6 +1703,17 @@ def train_online(
                     forced_imitation_pass_mult=forced_imitation_pass_mult,
                     full_game_meta_adv_weight=full_game_meta_adv_weight,
                     bidding_meta_adv_weight=bidding_meta_adv_weight,
+                    bid_overreach_weight=(
+                        bid_overreach_weight_full_game
+                        if train_phase == "full_game"
+                        else bid_overreach_weight_bidding
+                        if train_phase == "bidding_prop"
+                        else bid_overreach_weight
+                    ),
+                    bid_soft_cap_weight=bid_soft_cap_weight,
+                    bid_soft_cap_margin=bid_soft_cap_margin,
+                    stop_bid_penalty_weight=stop_bid_penalty_weight,
+                    stop_bid_margin=stop_bid_margin,
                 )
                 if not math.isfinite(float(losses.get("total", float("nan")))):
                     invalid_batch_detected = True
@@ -1513,17 +1780,17 @@ def train_online(
         Log.success(f"Round {rnd+1:3d} Summary:")
         elapsed_run = time.time() - train_start
         avg_round_time = elapsed_run / max(local_round, 1)
-        rounds_left = max(0, total_rounds - local_round)
+        rounds_left = max(0, local_total_rounds - local_round)
         eta_run = avg_round_time * rounds_left
         print(f"  - Policy:   {policy_label}")
         print(f"  - Phase:    {train_phase} ({phase_local_round}/{max(1, int(phase_plan.get(train_phase, 0)) or phase_local_round)})")
-        print(f"  - Round:    {rnd+1}/{rounds} (local {local_round}/{total_rounds})")
+        print(f"  - Round:    {rnd+1}/{rounds} (local {local_round}/{local_total_rounds})")
         print(f"  - RunETA:   {_format_eta(eta_run)} remaining (elapsed {_format_eta(elapsed_run)})")
         print(f"  - Games:    {round_games} ({rate:.1f} games/s)")
         print(f"  - Samples:  {n_trans} transitions")
         print(f"  - TrainBatch:{round_train_batch}")
         print(f"  - OptEpochs:{epoch}")
-        print(f"  - Losses:   Total: {avg_loss.get('total',0):.4f} | Pol: {avg_loss.get('policy',0):.4f} | Imit: {avg_loss.get('forced_imitation',0):.4f} | Val: {avg_loss.get('value',0):.4f} | Ent: {avg_loss.get('entropy',0):.4f} | Pts: {avg_loss.get('pts',0):.4f} | Hidden: {avg_loss.get('hidden',0):.4f} | KL: {avg_loss.get('approx_kl',0):.4f} | Clip: {avg_loss.get('clipfrac',0):.3f}")
+        print(f"  - Losses:   Total: {avg_loss.get('total',0):.4f} | Pol: {avg_loss.get('policy',0):.4f} | Imit: {avg_loss.get('forced_imitation',0):.4f} | OverBid: {avg_loss.get('bid_overreach',0):.4f} | Bid>Pred: {avg_loss.get('bid_over_pred_rate',0):.1%} | AvgOver: {avg_loss.get('avg_bid_overreach',0):.4f} | SoftCap: {avg_loss.get('bid_soft_cap_mean',0):.4f} | StopBid: {avg_loss.get('stop_bid_penalty_mean',0):.4f} | MakeableBid: {avg_loss.get('makeable_bid_rate',0):.1%} | Val: {avg_loss.get('value',0):.4f} | Ent: {avg_loss.get('entropy',0):.4f} | Pts: {avg_loss.get('pts',0):.4f} | Hidden: {avg_loss.get('hidden',0):.4f} | KL: {avg_loss.get('approx_kl',0):.4f} | Clip: {avg_loss.get('clipfrac',0):.3f}")
         print(f"  - HiddenAux: PosBCE: {avg_loss.get('hidden_pos_loss',0):.4f} | KnownBCE: {avg_loss.get('hidden_known_loss',0):.4f} | ImpBCE: {avg_loss.get('hidden_impossible_loss',0):.4f} | Count: {avg_loss.get('hidden_count_loss',0):.4f} | Exclusive: {avg_loss.get('hidden_exclusive_loss',0):.4f}")
         print(f"  - HiddenQ:   PosAcc: {avg_loss.get('hidden_pos_acc',0):.3f} | KnownAcc: {avg_loss.get('hidden_known_acc',0):.3f} | ExclusiveAcc: {avg_loss.get('hidden_exclusive_acc',0):.3f} | ImpossibleMass: {avg_loss.get('impossible_mass',0):.3f}")
         print(
@@ -1593,7 +1860,16 @@ def train_online(
 
         # ── Evaluate + checkpoint ────────────────────────────────────────────
         if (rnd + 1) % eval_every == 0 and stage == 1:
-            eval_metrics = eval_deterministic(model, device, n=100, reward_cfg=reward_cfg)
+            eval_metrics = eval_deterministic(
+                model,
+                device,
+                n=100,
+                reward_cfg=reward_cfg,
+                bid_soft_cap_weight=bid_soft_cap_weight,
+                bid_soft_cap_margin=bid_soft_cap_margin,
+                stop_bid_penalty_weight=stop_bid_penalty_weight,
+                stop_bid_margin=stop_bid_margin,
+            )
             avg_diff = eval_metrics["avg_diff"]
             print(f"           -> Point diff (100 games): {avg_diff:+.1f}")
             eq = eval_metrics.get("quality", {})
@@ -1811,12 +2087,34 @@ if __name__ == "__main__":
                    help="Weight for per-card unique-seat assignment (set-theoretic exclusivity) loss")
     p.add_argument("--forced-imitation-weight", type=float, default=0.5,
                    help="Base weight for imitation loss on heuristic-forced actions")
-    p.add_argument("--forced-imitation-bid-mult", type=float, default=1.5,
+    p.add_argument("--forced-imitation-bid-mult", type=float, default=2.5,
                    help="Extra multiplier for forced imitation on bidding actions")
-    p.add_argument("--forced-imitation-pass-mult", type=float, default=2.5,
+    p.add_argument("--forced-imitation-pass-mult", type=float, default=3.5,
                    help="Extra multiplier for forced imitation on passing actions")
-    p.add_argument("--forced-imitation-decay-rounds", type=int, default=128,
+    p.add_argument("--forced-imitation-decay-rounds", type=int, default=384,
                    help="Rounds over which forced-action imitation weight decays")
+    p.add_argument("--all-model-seats", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use model policy for non-POV seats during simulation (stage>=1)")
+    p.add_argument("--bid-overreach-weight", type=float, default=0.20,
+                   help="Penalty weight when chosen bid exceeds predicted team points")
+    p.add_argument("--bid-overreach-weight-bidding", type=float, default=0.35,
+                   help="Penalty weight for bid overreach during bidding_prop phase")
+    p.add_argument("--bid-overreach-weight-full-game", type=float, default=0.30,
+                   help="Penalty weight for bid overreach during full_game phase")
+    p.add_argument("--bid-soft-cap-weight", type=float, default=1.20,
+                   help="Soft-logit penalty weight for bids above predicted make-value")
+    p.add_argument("--bid-soft-cap-margin", type=float, default=5.0,
+                   help="Free margin (points) before bid soft-cap penalty starts")
+    p.add_argument("--stop-bid-penalty-weight", type=float, default=0.0,
+                   help="Soft-logit penalty weight for StopBidding when a legal raise looks makeable")
+    p.add_argument("--stop-bid-margin", type=float, default=0.0,
+                   help="Extra free margin added before StopBidding is penalized")
+    p.add_argument("--failed-contract-penalty-base", type=float, default=0.15,
+                   help="Extra terminal penalty when the playing party fails contract (bidding/full phases)")
+    p.add_argument("--failed-contract-penalty-bid-scale", type=float, default=0.25,
+                   help="Additional failed-contract penalty scaled by highest_bid/points_normalizer")
+    p.add_argument("--ask-without-trump-penalty-weight", type=float, default=0.12,
+                   help="Penalty weight for playing-side questions that do not convert into trump calls")
     p.add_argument("--full-game-meta-adv-weight", type=float, default=0.85,
                    help="Blend weight for round-normalized game-outcome meta advantage in full_game phase")
     p.add_argument("--bidding-meta-adv-weight", type=float, default=0.35,
@@ -1847,6 +2145,10 @@ if __name__ == "__main__":
                    help="Point normalization constant used by reward calculations")
     p.add_argument("--passgame-base-reward", type=float, default=(115.0 / 420.0),
                    help="Terminal reward magnitude for pass games")
+    p.add_argument("--passgame-margin-weight", type=float, default=0.25,
+                   help="Extra weight for normalized pass-game point margin term")
+    p.add_argument("--no-contract-penalty", type=float, default=0.35,
+                   help="Flat terminal penalty applied when no one bids/plays")
     p.add_argument("--step-delta-scale", type=float, default=(1.0 / 420.0),
                    help="Scale for dense per-step point-delta reward")
     p.add_argument("--checkpoints-dir", default=str(DEFAULT_CKPT_DIR),
@@ -1913,6 +2215,17 @@ if __name__ == "__main__":
         forced_imitation_bid_mult=args.forced_imitation_bid_mult,
         forced_imitation_pass_mult=args.forced_imitation_pass_mult,
         forced_imitation_decay_rounds=args.forced_imitation_decay_rounds,
+        all_model_seats=args.all_model_seats,
+        bid_overreach_weight=args.bid_overreach_weight,
+        bid_overreach_weight_bidding=args.bid_overreach_weight_bidding,
+        bid_overreach_weight_full_game=args.bid_overreach_weight_full_game,
+        bid_soft_cap_weight=args.bid_soft_cap_weight,
+        bid_soft_cap_margin=args.bid_soft_cap_margin,
+        stop_bid_penalty_weight=args.stop_bid_penalty_weight,
+        stop_bid_margin=args.stop_bid_margin,
+        failed_contract_penalty_base=args.failed_contract_penalty_base,
+        failed_contract_penalty_bid_scale=args.failed_contract_penalty_bid_scale,
+        ask_without_trump_penalty_weight=args.ask_without_trump_penalty_weight,
         full_game_meta_adv_weight=args.full_game_meta_adv_weight,
         bidding_meta_adv_weight=args.bidding_meta_adv_weight,
         full_game_meta_margin_weight=args.full_game_meta_margin_weight,
@@ -1927,6 +2240,8 @@ if __name__ == "__main__":
         named_checkpoint=args.named_checkpoint,
         points_normalizer=args.points_normalizer,
         passgame_base_reward=args.passgame_base_reward,
+        passgame_margin_weight=args.passgame_margin_weight,
+        no_contract_penalty=args.no_contract_penalty,
         step_delta_scale=args.step_delta_scale,
         checkpoints_dir=args.checkpoints_dir,
         runs_dir=args.runs_dir,

@@ -39,7 +39,7 @@ force_passing_until_progress = 0.75
 force_bidding_until_progress = 0.90
 
 # --- Curriculum phase schedule (ratios + optional per-phase overrides) ---
-trick_phase_frac = 0.50
+trick_phase_frac = 0.40
 passing_phase_frac = 0.05
 bidding_phase_frac = 0.05
 # phase_trick_games_per_round = 0
@@ -62,9 +62,20 @@ hidden_count_weight = 0.1
 hidden_known_weight = 0.5
 hidden_exclusive_weight = 0.5
 forced_imitation_weight = 0.5
-forced_imitation_bid_mult = 1.5
-forced_imitation_pass_mult = 2.5
-forced_imitation_decay_rounds = 128
+forced_imitation_bid_mult = 2.5
+forced_imitation_pass_mult = 3.5
+forced_imitation_decay_rounds = 384
+all_model_seats = true
+bid_overreach_weight = 0.20
+bid_overreach_weight_bidding = 0.35
+bid_overreach_weight_full_game = 0.30
+bid_soft_cap_weight = 1.20
+bid_soft_cap_margin = 5.0
+stop_bid_penalty_weight = 0.0
+stop_bid_margin = 0.0
+failed_contract_penalty_base = 0.15
+failed_contract_penalty_bid_scale = 0.25
+ask_without_trump_penalty_weight = 0.12
 full_game_meta_adv_weight = 0.85
 bidding_meta_adv_weight = 0.35
 full_game_meta_margin_weight = 0.20
@@ -84,6 +95,8 @@ series_blend_weight_bidding = 0.35
 # --- Reward semantics ---
 points_normalizer = 420.0
 passgame_base_reward = 0.27380952380952384
+passgame_margin_weight = 0.25
+no_contract_penalty = 0.35
 step_delta_scale = 0.002380952380952381
 
 # --- Optional rolling checkpoint path ---

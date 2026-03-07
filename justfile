@@ -312,12 +312,99 @@ train-129k-v2 run_name="v2_human_first_129k": setup-ml build-human-dataset build
       if [ -f "$run_ckpt/best.pt" ]; then cp -f "$run_ckpt/best.pt" "$run_ckpt/$run_label"_pretrain_good_best.pt; fi; \
       cp -f "$run_ckpt/latest.pt" "$run_ckpt/$run_label"_pretrain_good_complete.pt; \
       cp -f "$run_ckpt/latest.pt" "$run_ckpt/$run_label"_pretrain_final.pt; \
-      ML_SERVER_BIN="$run_bin" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 {{cuda_alloc_env}} {{python}} ml/train_online.py --rounds 645 --games-per-round 256 --workers 24 --mc-rollouts 4 --train-batch 256 --device cuda --eval-every 16 --save-latest-every 16 --checkpoint "$run_ckpt/$run_label"_pretrain_final.pt --ppo-epochs 2 --min-ppo-epochs 2 --max-ppo-epochs 5 --target-kl 0.03 --max-clipfrac 0.40 --min-policy-improve 0.001 --opt-early-stop-patience 1 --adv-query-mode target_plus_stochastic --adv-non-target-prob 0.25 --max-adv-calls-per-episode 3 --trick-phase-frac 0.20 --passing-phase-frac 0.05 --bidding-phase-frac 0.05 --phase-trick-games-per-round 64 --phase-passing-games-per-round 64 --phase-bidding-games-per-round 64 --phase-full-games-per-round 256 --phase-trick-train-batch 384 --phase-passing-train-batch 384 --phase-bidding-train-batch 384 --phase-full-train-batch 256 --phase-loss-patience 3 --phase-loss-min-delta 0.005 --phase-min-rounds-frac 0.40 {{v2_model_args}} --named-checkpoint "$run_label"_selfplay_final.pt --checkpoints-dir "$run_ckpt" --runs-dir "$run_logs"; \
+      ML_SERVER_BIN="$run_bin" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 {{cuda_alloc_env}} {{python}} ml/train_online.py --rounds 645 --games-per-round 256 --workers 24 --mc-rollouts 4 --train-batch 256 --device cuda --eval-every 16 --save-latest-every 16 --checkpoint "$run_ckpt/$run_label"_pretrain_final.pt --ppo-epochs 2 --min-ppo-epochs 2 --max-ppo-epochs 5 --target-kl 0.03 --max-clipfrac 0.40 --min-policy-improve 0.001 --opt-early-stop-patience 1 --adv-query-mode target_plus_stochastic --adv-non-target-prob 0.25 --max-adv-calls-per-episode 3 --trick-phase-frac 0.40 --passing-phase-frac 0.05 --bidding-phase-frac 0.05 --phase-trick-games-per-round 64 --phase-passing-games-per-round 64 --phase-bidding-games-per-round 64 --phase-full-games-per-round 256 --phase-trick-train-batch 384 --phase-passing-train-batch 384 --phase-bidding-train-batch 384 --phase-full-train-batch 256 --phase-loss-patience 3 --phase-loss-min-delta 0.005 --phase-min-rounds-frac 0.40 {{v2_model_args}} --named-checkpoint "$run_label"_selfplay_final.pt --checkpoints-dir "$run_ckpt" --runs-dir "$run_logs"; \
       if [ -f "$run_ckpt/phase_gameplay_complete.pt" ]; then cp -f "$run_ckpt/phase_gameplay_complete.pt" "$run_ckpt/$run_label"_posttrain_gameplay_complete.pt; fi; \
       if [ -f "$run_ckpt/phase_passing_complete.pt" ]; then cp -f "$run_ckpt/phase_passing_complete.pt" "$run_ckpt/$run_label"_posttrain_passing_complete.pt; fi; \
       if [ -f "$run_ckpt/phase_bidding_complete.pt" ]; then cp -f "$run_ckpt/phase_bidding_complete.pt" "$run_ckpt/$run_label"_posttrain_bidding_complete.pt; fi; \
       if [ -f "$run_ckpt/phase_full_game_complete.pt" ]; then cp -f "$run_ckpt/phase_full_game_complete.pt" "$run_ckpt/$run_label"_full_game_complete.pt; fi; \
       cp -f "$run_ckpt/best.pt" "$run_ckpt/$run_label"_selfplay_best.pt; \
+      echo "Artifacts root: $run_root"
+
+# Resume/start only the online 129k-v2 RL phase from an existing pretraining checkpoint.
+# This skips dataset conversion + supervised pretraining.
+resume-129k-v2-online run_name="v2_129k_fix" pretrain_ckpt="ml/runs/v2_clean_20260305_155449/checkpoints/v2_clean_20260305_155449_pretrain_final.pt": setup-ml
+    @echo "Running online-only 129k-v2 phase from pretraining checkpoint..."
+    @run_label="{{run_name}}"; \
+      case "$run_label" in run_name=*) run_label="${run_label#run_name=}" ;; esac; \
+      pre_ckpt="{{pretrain_ckpt}}"; \
+      case "$pre_ckpt" in pretrain_ckpt=*) pre_ckpt="${pre_ckpt#pretrain_ckpt=}" ;; esac; \
+      run_root="ml/runs/$run_label"; \
+      run_ckpt="$run_root/checkpoints"; \
+      run_logs="$run_root/logs"; \
+      run_bin_dir="$run_root/bin"; \
+      run_bin="$run_bin_dir/$(basename "{{ml_server_bin}}")"; \
+      mkdir -p "$run_ckpt" "$run_logs" "$run_bin_dir"; \
+      cp -f "{{ml_server_bin}}" "$run_bin"; \
+      ML_SERVER_BIN="$run_bin" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 {{cuda_alloc_env}} {{python}} ml/train_online.py --rounds 645 --games-per-round 256 --workers 24 --mc-rollouts 4 --train-batch 256 --device cuda --eval-every 16 --save-latest-every 16 --checkpoint "$pre_ckpt" --ppo-epochs 2 --min-ppo-epochs 2 --max-ppo-epochs 5 --target-kl 0.03 --max-clipfrac 0.40 --min-policy-improve 0.001 --opt-early-stop-patience 1 --adv-query-mode target_plus_stochastic --adv-non-target-prob 0.25 --max-adv-calls-per-episode 3 --trick-phase-frac 0.40 --passing-phase-frac 0.05 --bidding-phase-frac 0.05 --phase-trick-games-per-round 64 --phase-passing-games-per-round 64 --phase-bidding-games-per-round 64 --phase-full-games-per-round 256 --phase-trick-train-batch 384 --phase-passing-train-batch 384 --phase-bidding-train-batch 384 --phase-full-train-batch 256 --phase-loss-patience 3 --phase-loss-min-delta 0.005 --phase-min-rounds-frac 0.40 --passgame-base-reward 0.27380952380952384 --passgame-margin-weight 0.25 --no-contract-penalty 0.35 {{v2_model_args}} --named-checkpoint "$run_label"_selfplay_final.pt --checkpoints-dir "$run_ckpt" --runs-dir "$run_logs"; \
+      cp -f "$run_ckpt/best.pt" "$run_ckpt/$run_label"_selfplay_best.pt; \
+      echo "Artifacts root: $run_root"
+
+# Resume the 129k-v2 online phase from an existing online/latest checkpoint.
+# - checkpoint: path or "latest"/"latest.pt" (resolved under run checkpoints)
+# - start_round: "auto" (reads round from checkpoint) or explicit integer
+# - workers/mc_rollouts can be tuned for throughput
+resume-129k-v2-online-round run_name="v2_129k_fix" checkpoint="latest.pt" start_round="auto" workers="24" mc_rollouts="4": setup-ml
+    @echo "Resuming online-only 129k-v2 run from checkpoint..."
+    @set -e; \
+      run_label="{{run_name}}"; \
+      case "$run_label" in run_name=*) run_label="${run_label#run_name=}" ;; esac; \
+      ckpt_spec="{{checkpoint}}"; \
+      case "$ckpt_spec" in checkpoint=*) ckpt_spec="${ckpt_spec#checkpoint=}" ;; esac; \
+      start_spec="{{start_round}}"; \
+      case "$start_spec" in start_round=*) start_spec="${start_spec#start_round=}" ;; esac; \
+      worker_spec="{{workers}}"; \
+      case "$worker_spec" in workers=*) worker_spec="${worker_spec#workers=}" ;; esac; \
+      roll_spec="{{mc_rollouts}}"; \
+      case "$roll_spec" in mc_rollouts=*) roll_spec="${roll_spec#mc_rollouts=}" ;; esac; \
+      run_root="ml/runs/$run_label"; \
+      run_ckpt="$run_root/checkpoints"; \
+      run_logs="$run_root/logs"; \
+      run_bin_dir="$run_root/bin"; \
+      run_bin="$run_bin_dir/$(basename "{{ml_server_bin}}")"; \
+      mkdir -p "$run_ckpt" "$run_logs" "$run_bin_dir"; \
+      cp -f "{{ml_server_bin}}" "$run_bin"; \
+      if [ "$ckpt_spec" = "latest" ] || [ "$ckpt_spec" = "latest.pt" ]; then \
+        resume_ckpt="$run_ckpt/latest.pt"; \
+      else \
+        resume_ckpt="$ckpt_spec"; \
+      fi; \
+      if [ ! -f "$resume_ckpt" ]; then \
+        echo "Checkpoint not found: $resume_ckpt"; \
+        exit 1; \
+      fi; \
+      if [ "$start_spec" = "auto" ]; then \
+        start_val=$(echo "$resume_ckpt" | sed -n 's/.*online_round_\([0-9][0-9]*\)\.pt$/\1/p'); \
+        if [ -z "$start_val" ]; then \
+          start_val=$(ls "$run_ckpt"/online_round_*.pt 2>/dev/null | sed -n 's/.*online_round_\([0-9][0-9]*\)\.pt$/\1/p' | sort -n | tail -1); \
+        fi; \
+        if [ -z "$start_val" ]; then start_val=0; fi; \
+      else \
+        start_val="$start_spec"; \
+      fi; \
+      echo "Using checkpoint: $resume_ckpt"; \
+      echo "Resuming at start_round=$start_val"; \
+      ML_SERVER_BIN="$run_bin" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 {{cuda_alloc_env}} {{python}} ml/train_online.py --rounds 645 --start-round "$start_val" --games-per-round 256 --workers "$worker_spec" --mc-rollouts "$roll_spec" --train-batch 256 --device cuda --eval-every 16 --save-latest-every 16 --checkpoint "$resume_ckpt" --ppo-epochs 2 --min-ppo-epochs 2 --max-ppo-epochs 5 --target-kl 0.03 --max-clipfrac 0.40 --min-policy-improve 0.001 --opt-early-stop-patience 1 --adv-query-mode target_plus_stochastic --adv-non-target-prob 0.25 --max-adv-calls-per-episode 3 --trick-phase-frac 0.40 --passing-phase-frac 0.05 --bidding-phase-frac 0.05 --phase-trick-games-per-round 64 --phase-passing-games-per-round 64 --phase-bidding-games-per-round 64 --phase-full-games-per-round 256 --phase-trick-train-batch 384 --phase-passing-train-batch 384 --phase-bidding-train-batch 384 --phase-full-train-batch 256 --phase-loss-patience 3 --phase-loss-min-delta 0.005 --phase-min-rounds-frac 0.40 --passgame-base-reward 0.27380952380952384 --passgame-margin-weight 0.25 --no-contract-penalty 0.35 {{v2_model_args}} --named-checkpoint "$run_label"_selfplay_final.pt --checkpoints-dir "$run_ckpt" --runs-dir "$run_logs"; \
+      if [ -f "$run_ckpt/best.pt" ]; then cp -f "$run_ckpt/best.pt" "$run_ckpt/$run_label"_selfplay_best.pt; fi; \
+      echo "Artifacts root: $run_root"
+
+# Fresh 129k-v2 online run with the self-play recovery fixes enabled.
+# Keeps the high-throughput profile (24 workers / 4 MC rollouts) and starts from
+# the post-human pretraining checkpoint.
+train-129k-v2-recover run_name="v2_recover" pretrain_ckpt="ml/runs/v2_clean_20260305_155449/checkpoints/v2_clean_20260305_155449_pretrain_final.pt": setup-ml
+    @echo "Starting fresh 129k-v2 recovery run from pretraining checkpoint..."
+    @run_label="{{run_name}}"; \
+      case "$run_label" in run_name=*) run_label="${run_label#run_name=}" ;; esac; \
+      pre_ckpt="{{pretrain_ckpt}}"; \
+      case "$pre_ckpt" in pretrain_ckpt=*) pre_ckpt="${pre_ckpt#pretrain_ckpt=}" ;; esac; \
+      run_root="ml/runs/$run_label"; \
+      run_ckpt="$run_root/checkpoints"; \
+      run_logs="$run_root/logs"; \
+      run_bin_dir="$run_root/bin"; \
+      run_bin="$run_bin_dir/$(basename "{{ml_server_bin}}")"; \
+      mkdir -p "$run_ckpt" "$run_logs" "$run_bin_dir"; \
+      cp -f "{{ml_server_bin}}" "$run_bin"; \
+      ML_SERVER_BIN="$run_bin" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 {{cuda_alloc_env}} {{python}} ml/train_online.py --rounds 645 --games-per-round 256 --workers 24 --mc-rollouts 4 --train-batch 256 --device cuda --eval-every 16 --save-latest-every 16 --checkpoint "$pre_ckpt" --ppo-epochs 2 --min-ppo-epochs 2 --max-ppo-epochs 5 --target-kl 0.03 --max-clipfrac 0.40 --min-policy-improve 0.001 --opt-early-stop-patience 1 --adv-query-mode target_plus_stochastic --adv-non-target-prob 0.15 --max-adv-calls-per-episode 4 --max-pass-adv-calls-per-episode 4 --max-info-adv-calls-per-episode 3 --force-passing-until-progress 0.35 --force-bidding-until-progress 0.55 --trick-phase-frac 0.40 --passing-phase-frac 0.05 --bidding-phase-frac 0.05 --phase-trick-games-per-round 64 --phase-passing-games-per-round 64 --phase-bidding-games-per-round 64 --phase-full-games-per-round 256 --phase-trick-train-batch 384 --phase-passing-train-batch 384 --phase-bidding-train-batch 384 --phase-full-train-batch 256 --phase-loss-patience 3 --phase-loss-min-delta 0.005 --phase-min-rounds-frac 0.40 --forced-imitation-bid-mult 2.0 --forced-imitation-pass-mult 2.25 --forced-imitation-decay-rounds 256 --bid-soft-cap-weight 0.90 --bid-soft-cap-margin 10.0 --stop-bid-penalty-weight 0.75 --stop-bid-margin 8.0 --passgame-base-reward 0.18 --passgame-margin-weight 0.20 --no-contract-penalty 0.48 {{v2_model_args}} --named-checkpoint "$run_label"_selfplay_final.pt --checkpoints-dir "$run_ckpt" --runs-dir "$run_logs"; \
+      if [ -f "$run_ckpt/best.pt" ]; then cp -f "$run_ckpt/best.pt" "$run_ckpt/$run_label"_selfplay_best.pt; fi; \
       echo "Artifacts root: $run_root"
 
 # 128k-game human-first run profile:
@@ -406,12 +493,22 @@ ui checkpoint="latest" port="8765": install-ml-deps ensure-ml-server-ui-runtime
 # Example:
 #   just eval-fixed checkpoint=latest max_cases=10
 #   just eval-fixed checkpoint=1 echo=0
-eval-fixed suite="ml/eval/fixed_deals_100.json" checkpoint="latest" max_cases="0" echo="1": install-ml-deps ensure-ml-server-release
-    @echo_flag="{{echo}}"; \
+eval-fixed suite="ml/eval/fixed_deals_100.json" checkpoint="latest" max_cases="0" echo="1" ansi="1": install-ml-deps ensure-ml-server-release
+    @suite_arg="{{suite}}"; \
+      case "$suite_arg" in suite=*) suite_arg="${suite_arg#suite=}" ;; esac; \
+      checkpoint_arg="{{checkpoint}}"; \
+      case "$checkpoint_arg" in checkpoint=*) checkpoint_arg="${checkpoint_arg#checkpoint=}" ;; esac; \
+      max_cases_arg="{{max_cases}}"; \
+      case "$max_cases_arg" in max_cases=*) max_cases_arg="${max_cases_arg#max_cases=}" ;; esac; \
+      echo_flag="{{echo}}"; \
       case "$echo_flag" in echo=*) echo_flag="${echo_flag#echo=}" ;; esac; \
+      ansi_flag="{{ansi}}"; \
+      case "$ansi_flag" in ansi=*) ansi_flag="${ansi_flag#ansi=}" ;; esac; \
       echo_opt=""; \
       if [ "$echo_flag" = "1" ]; then echo_opt="--echo"; fi; \
-      ML_SERVER_BIN="{{ml_server_bin}}" {{python}} ml/eval_fixed_deals.py --suite "{{suite}}" --all-checkpoint "{{checkpoint}}" --max-cases "{{max_cases}}" $echo_opt
+      ansi_opt="--ansi"; \
+      if [ "$ansi_flag" = "0" ]; then ansi_opt="--no-ansi"; fi; \
+      ML_SERVER_BIN="{{ml_server_bin}}" {{python}} ml/eval_fixed_deals.py --suite "$suite_arg" --all-checkpoint "$checkpoint_arg" --max-cases "$max_cases_arg" $echo_opt $ansi_opt
 
 # Generate random fixed-deal suites (explicit 4x9 hands) via ml_server.
 gen-fixed-deals count="100" output="ml/eval/fixed_deals_random_100.json" master_seed="20260303": install-ml-deps ensure-ml-server-release

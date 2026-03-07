@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast
 
+from .policy_adjust import apply_bid_consistency_adjustments
+
 
 def _blend_policy_advantage(
     base_advantage: torch.Tensor,
@@ -107,6 +109,11 @@ def train_step(
     forced_imitation_pass_mult: float = 1.0,
     full_game_meta_adv_weight: float = 0.85,
     bidding_meta_adv_weight: float = 0.30,
+    bid_overreach_weight: float = 0.20,
+    bid_soft_cap_weight: float = 0.0,
+    bid_soft_cap_margin: float = 0.0,
+    stop_bid_penalty_weight: float = 0.0,
+    stop_bid_margin: float = 0.0,
 ) -> dict:
     model.train()
     with autocast(device_type='cuda', enabled=use_amp):
@@ -121,6 +128,22 @@ def train_step(
         # IMPORTANT: We use -1e4 instead of -1e9 because PyTorch AMP (Float16) 
         # has a minimum representable value of roughly -65504.
         masked_logits = logits.masked_fill(batch["action_mask"], -1e4)
+        policy_adjust_stats = {
+            "bid_soft_cap_mean": torch.tensor(0.0, device=logits.device),
+            "stop_bid_penalty_mean": torch.tensor(0.0, device=logits.device),
+            "makeable_bid_rate": torch.tensor(0.0, device=logits.device),
+        }
+        if train_phase in ("bidding_prop", "full_game"):
+            masked_logits, policy_adjust_stats = apply_bid_consistency_adjustments(
+                masked_logits,
+                batch["action_feats"],
+                batch["action_mask"],
+                pts_pred,
+                bid_soft_cap_weight=bid_soft_cap_weight,
+                bid_soft_cap_margin=bid_soft_cap_margin,
+                stop_bid_penalty_weight=stop_bid_penalty_weight,
+                stop_bid_margin=stop_bid_margin,
+            )
         log_p = F.log_softmax(masked_logits, dim=-1)
         chosen_lp = log_p.gather(1, batch["action_idx"].unsqueeze(1)).squeeze(1)
         
@@ -144,7 +167,7 @@ def train_step(
         value_loss = F.mse_loss(value_pred, batch["value"])
         
         # Entropy Bonus
-        probs = F.softmax(logits, dim=-1)
+        probs = F.softmax(masked_logits, dim=-1)
         safe_log_p = log_p.masked_fill(batch["action_mask"], 0.0)
         entropy = -(probs * safe_log_p).sum(dim=-1).mean()
         entropy_loss = -0.01 * entropy
@@ -160,6 +183,9 @@ def train_step(
             batch["action_idx"].unsqueeze(1).unsqueeze(2).expand(-1, -1, feat_dim),
         ).squeeze(1)
         is_bid = chosen_feats[:, 1] > 0.5
+        bid_overreach_loss = torch.tensor(0.0, device=logits.device)
+        bid_over_pred_rate = torch.tensor(0.0, device=logits.device)
+        bid_overreach_mean = torch.tensor(0.0, device=logits.device)
 
         policy_mask = sampled_mask.clone()
         imitation_mask = is_forced.clone()
@@ -288,16 +314,21 @@ def train_step(
         
         # bid_value is at index 32, normalized as (val - 120)/300.0
         # point_pred my_pts is normalized as pts / 420.0
-        # If the bid is higher than predicted score, add a heavy penalty
+        # Penalize aggressive overbids: bid should not exceed predicted evaluated score.
         if is_bid.any():
             bid_values_norm = chosen_feats[is_bid, 32]
             # convert bid norm back to actual bid, then norm for 420
             bid_actual = bid_values_norm * 300.0 + 120.0
             
-            # Predict our team's points (assuming pov=0, so index 0)
+            # Predict our team's evaluated points (index 0 in pts head = my-team from POV).
             predicted_pts_actual = pts_pred[is_bid, 0] * 420.0
-            
-            # (Removed the exponential overbid padding because it artificially exploded the sigmoid bounds)
+
+            overreach_norm = torch.relu((bid_actual - predicted_pts_actual) / 420.0)
+            bid_overreach_loss = (overreach_norm * overreach_norm).mean()
+            bid_overreach_mean = overreach_norm.mean()
+            bid_over_pred_rate = (bid_actual > predicted_pts_actual).float().mean()
+            if bid_overreach_weight > 0.0:
+                loss = loss + float(bid_overreach_weight) * bid_overreach_loss
 
     if torch.isnan(loss) or torch.isinf(loss):
         print(f"\n[DEBUG] NaN detected. policy: {policy_loss.item()}, value: {value_loss.item()}, entropy: {entropy_loss.item()}, pts_loss: {pts_loss.item()}")
@@ -322,6 +353,12 @@ def train_step(
             "approx_kl": float('nan'),
             "clipfrac": float('nan'),
             "forced_imitation": float('nan'),
+            "bid_overreach": float('nan'),
+            "bid_over_pred_rate": float('nan'),
+            "avg_bid_overreach": float('nan'),
+            "bid_soft_cap_mean": float('nan'),
+            "stop_bid_penalty_mean": float('nan'),
+            "makeable_bid_rate": float('nan'),
             "meta_adv_weight": float('nan'),
         }
 
@@ -362,6 +399,12 @@ def train_step(
         "approx_kl": approx_kl.item() if grads_valid else float('nan'),
         "clipfrac": clipfrac.item() if grads_valid else float('nan'),
         "forced_imitation": forced_imitation_loss.item() if grads_valid else float('nan'),
+        "bid_overreach": bid_overreach_loss.item() if grads_valid else float('nan'),
+        "bid_over_pred_rate": bid_over_pred_rate.item() if grads_valid else float('nan'),
+        "avg_bid_overreach": bid_overreach_mean.item() if grads_valid else float('nan'),
+        "bid_soft_cap_mean": policy_adjust_stats["bid_soft_cap_mean"].item() if grads_valid else float('nan'),
+        "stop_bid_penalty_mean": policy_adjust_stats["stop_bid_penalty_mean"].item() if grads_valid else float('nan'),
+        "makeable_bid_rate": policy_adjust_stats["makeable_bid_rate"].item() if grads_valid else float('nan'),
         "meta_adv_weight": float(
             full_game_meta_adv_weight if train_phase == "full_game"
             else bidding_meta_adv_weight if train_phase == "bidding_prop"

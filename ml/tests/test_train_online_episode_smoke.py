@@ -30,7 +30,7 @@ class TrainOnlineEpisodeSmokeTest(unittest.TestCase):
             runs_dir.mkdir(parents=True, exist_ok=True)
 
             # Artificial seed checkpoint to validate resume/load path as part of the smoke run.
-            seed_model, seed_meta = create_model(model_family="legacy")
+            seed_model, seed_meta = create_model(model_family="parallel_v2")
             seed_payload = build_checkpoint_payload(
                 seed_model,
                 metadata={
