@@ -77,7 +77,12 @@ Operational tooling:
    - `just train-four-model-endtoend`
    - `ml/train_four_model_endtoend.py`
    - end-to-end loop can also perform fixed-suite governance every cycle
-16. Live structured-state transport and manifest-aware runtime:
+16. Strict phase-by-phase autorun:
+   - `ml/train_four_model_autorun.py`
+   - promotes validated phase checkpoints
+   - writes `phase_reports/*.json`
+   - retries failed phases and rejects self-play cycles with missing task coverage
+17. Live structured-state transport and manifest-aware runtime:
    - `src/ml/proto.rs`
    - `ml/env.py`
    - `ml/four_model_runtime.py`

@@ -122,6 +122,12 @@ Decision-model foundation now exists separately:
   - `ml/train_four_model_endtoend.py`
   - `just train-four-model-endtoend`
   - can run fixed-suite governance every cycle via `--fixed-suite`
+- strict autorun with phase validation and retries:
+  - `ml/train_four_model_autorun.py`
+  - promotes per-phase `*_validated.pt` checkpoints
+  - writes `phase_reports/*.json`
+  - fails hard if a human phase or the joint phase does not pass semantic gates
+  - validates self-play task coverage before each joint update
 - manifest-aware evaluation / UI:
   - `just eval-fixed checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json`
   - `just eval-fixed-four-model manifest=...`

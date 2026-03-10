@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ try:
         FourModelOutputs,
         write_four_model_manifest,
     )
+    from ml.checkpoint_utils import checkpoint_metadata
     from ml.generate_four_model_selfplay import generate_selfplay_dataset
     from ml.train_belief_from_dataset import train as train_belief
     from ml.train_decision_from_dataset import train as train_decision
@@ -24,6 +26,7 @@ except ModuleNotFoundError:
         FourModelOutputs,
         write_four_model_manifest,
     )
+    from checkpoint_utils import checkpoint_metadata
     from generate_four_model_selfplay import generate_selfplay_dataset
     from train_belief_from_dataset import train as train_belief
     from train_decision_from_dataset import train as train_decision
@@ -38,6 +41,9 @@ class TaskThresholds:
     playing_acc: float = 0.52
     belief_hidden_acc: float = 0.38
     belief_consistency: float = 0.99
+    min_selfplay_bidding_records: int = 8
+    min_selfplay_passing_records: int = 8
+    min_selfplay_playing_records: int = 32
     max_pass_game_rate: float = 0.40
     min_contract_made_rate: float = 0.10
     min_avg_bid: float = 125.0
@@ -52,12 +58,92 @@ class PhaseAttemptResult:
     passed: bool
 
 
+class PhaseValidationError(RuntimeError):
+    pass
+
+
 def _load_manifest_metrics(manifest_path: str | Path) -> dict:
     return json.loads(Path(manifest_path).read_text(encoding="utf-8")).get("metadata", {})
 
 
 def _write_progress(root: Path, payload: dict) -> None:
     (root / "autorun_progress.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _read_phase_metric(checkpoint_path: Path, *keys: str) -> float | None:
+    metadata = checkpoint_metadata(checkpoint_path)
+    current: object = metadata
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    try:
+        return float(current)
+    except (TypeError, ValueError):
+        return None
+
+
+def _promote_checkpoint(src: Path, dst: Path) -> Path:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
+
+
+def _write_phase_report(root: Path, phase: str, payload: dict) -> Path:
+    phase_dir = root / "phase_reports"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    report_path = phase_dir / f"{phase}.json"
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return report_path
+
+
+def _task_from_record_payload(record: dict) -> str | None:
+    canonical = record.get("canonical_state")
+    if isinstance(canonical, dict):
+        global_state = canonical.get("global")
+        if isinstance(global_state, dict):
+            phase = global_state.get("phase")
+            if isinstance(phase, str):
+                return phase
+    phase = record.get("phase")
+    if isinstance(phase, str):
+        return phase
+    return None
+
+
+def _summarize_selfplay_tasks(data_path: str | Path) -> dict[str, int]:
+    counts = {"bidding": 0, "passing": 0, "playing": 0}
+    with Path(data_path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            phase_name = _task_from_record_payload(record)
+            if not phase_name:
+                continue
+            task = phase_name
+            if phase_name in ("Bidding", "Raising") or phase_name.startswith("Bidding") or phase_name.startswith("Raising"):
+                task = "bidding"
+            elif phase_name in ("PassingForth", "PassingBack") or phase_name.startswith("Passing"):
+                task = "passing"
+            else:
+                task = "playing"
+            counts[task] += 1
+    return counts
+
+
+def _validate_selfplay_coverage(data_path: str | Path, thresholds: TaskThresholds) -> tuple[bool, dict[str, float]]:
+    counts = _summarize_selfplay_tasks(data_path)
+    passed = (
+        counts["bidding"] >= thresholds.min_selfplay_bidding_records
+        and counts["passing"] >= thresholds.min_selfplay_passing_records
+        and counts["playing"] >= thresholds.min_selfplay_playing_records
+    )
+    return passed, {key: float(value) for key, value in counts.items()}
 
 
 def _train_decision_phase(
@@ -75,7 +161,6 @@ def _train_decision_phase(
     max_retries: int,
 ) -> tuple[Path, list[PhaseAttemptResult]]:
     phase_dir = root / stage.task
-    checkpoint: Path | None = None
     attempts: list[PhaseAttemptResult] = []
     threshold_map = {
         "bidding": thresholds.bidding_acc,
@@ -84,6 +169,7 @@ def _train_decision_phase(
     }
     required_acc = threshold_map[stage.task]
     for attempt in range(1, max_retries + 1):
+        attempt_dir = phase_dir / f"attempt_{attempt:02d}"
         summary = train_decision(
             data_path=data_path,
             task=stage.task,
@@ -91,28 +177,61 @@ def _train_decision_phase(
             batch=stage.batch,
             device=device,
             workers=workers,
-            checkpoints_dir=phase_dir,
+            checkpoints_dir=attempt_dir,
             max_steps=max_steps,
             min_epochs=min_epochs,
             target_acc=stage.target_acc,
             target_acc_streak=target_acc_streak,
             no_amp=no_amp,
-            checkpoint=checkpoint,
+            checkpoint=None,
         )
         acc = float(summary["accuracy"])
-        passed = acc >= required_acc
+        latest_checkpoint = attempt_dir / f"{stage.task}_latest.pt"
+        best_checkpoint = attempt_dir / f"{stage.task}_best.pt"
+        selected_checkpoint = best_checkpoint if best_checkpoint.exists() else latest_checkpoint
+        selected_acc = _read_phase_metric(selected_checkpoint, "accuracy") or acc
+        policy_loss = _read_phase_metric(selected_checkpoint, "policy_loss")
+        passed = selected_acc >= required_acc
         attempts.append(
             PhaseAttemptResult(
                 phase=stage.task,
                 attempt=attempt,
-                metrics={"accuracy": acc},
+                metrics={
+                    "accuracy": selected_acc,
+                    "policy_loss": policy_loss if policy_loss is not None else float(summary.get("policy_loss", 0.0)),
+                },
                 passed=passed,
             )
         )
-        checkpoint = phase_dir / f"{stage.task}_latest.pt"
         if passed:
-            return checkpoint, attempts
-    return checkpoint or (phase_dir / f"{stage.task}_latest.pt"), attempts
+            promoted_checkpoint = _promote_checkpoint(
+                selected_checkpoint,
+                phase_dir / f"{stage.task}_validated.pt",
+            )
+            _write_phase_report(
+                root.parent,
+                stage.task,
+                {
+                    "phase": stage.task,
+                    "selected_checkpoint": str(promoted_checkpoint),
+                    "attempts": [asdict(a) for a in attempts],
+                    "target_accuracy": required_acc,
+                },
+            )
+            return promoted_checkpoint, attempts
+    _write_phase_report(
+        root.parent,
+        stage.task,
+        {
+            "phase": stage.task,
+            "attempts": [asdict(a) for a in attempts],
+            "target_accuracy": required_acc,
+            "failed": True,
+        },
+    )
+    raise PhaseValidationError(
+        f"decision phase '{stage.task}' failed semantic validation after {max_retries} attempts"
+    )
 
 
 def _train_belief_phase(
@@ -129,26 +248,38 @@ def _train_belief_phase(
     max_retries: int,
 ) -> tuple[Path, list[PhaseAttemptResult]]:
     phase_dir = root / "belief"
-    checkpoint: Path | None = None
     attempts: list[PhaseAttemptResult] = []
     for attempt in range(1, max_retries + 1):
+        attempt_dir = phase_dir / f"attempt_{attempt:02d}"
         summary = train_belief(
             data_path=data_path,
             epochs=stage.epochs,
             batch=stage.batch,
             device=device,
             workers=workers,
-            checkpoints_dir=phase_dir,
+            checkpoints_dir=attempt_dir,
             max_steps=max_steps,
             min_epochs=stage.min_epochs,
             target_hidden_acc=stage.target_hidden_acc,
             target_hidden_streak=target_hidden_streak,
             no_amp=no_amp,
-            checkpoint=checkpoint,
+            checkpoint=None,
         )
-        hidden_acc = float(summary["card_owner_acc"])
-        consistency = float(summary["constraint_consistency"])
-        passed = hidden_acc >= thresholds.belief_hidden_acc and consistency >= thresholds.belief_consistency
+        latest_checkpoint = attempt_dir / "belief_latest.pt"
+        best_checkpoint = attempt_dir / "belief_best.pt"
+        selected_checkpoint = best_checkpoint if best_checkpoint.exists() else latest_checkpoint
+        hidden_acc = _read_phase_metric(selected_checkpoint, "belief_metrics", "card_owner_acc") or float(summary["card_owner_acc"])
+        consistency = _read_phase_metric(selected_checkpoint, "belief_metrics", "constraint_consistency") or float(summary["constraint_consistency"])
+        void_acc = _read_phase_metric(selected_checkpoint, "belief_metrics", "void_suit_acc") or float(summary.get("void_suit_acc", 0.0))
+        half_pair_acc = _read_phase_metric(selected_checkpoint, "belief_metrics", "half_pair_acc") or float(summary.get("half_pair_acc", 0.0))
+        calibration = _read_phase_metric(selected_checkpoint, "belief_metrics", "calibration_score") or float(summary.get("calibration_score", 0.0))
+        passed = (
+            hidden_acc >= thresholds.belief_hidden_acc
+            and consistency >= thresholds.belief_consistency
+            and void_acc >= 0.55
+            and half_pair_acc >= 0.55
+            and calibration >= 0.45
+        )
         attempts.append(
             PhaseAttemptResult(
                 phase="belief",
@@ -156,14 +287,42 @@ def _train_belief_phase(
                 metrics={
                     "card_owner_acc": hidden_acc,
                     "constraint_consistency": consistency,
+                    "void_suit_acc": void_acc,
+                    "half_pair_acc": half_pair_acc,
+                    "calibration_score": calibration,
                 },
                 passed=passed,
             )
         )
-        checkpoint = phase_dir / "belief_latest.pt"
         if passed:
-            return checkpoint, attempts
-    return checkpoint or (phase_dir / "belief_latest.pt"), attempts
+            promoted_checkpoint = _promote_checkpoint(selected_checkpoint, phase_dir / "belief_validated.pt")
+            _write_phase_report(
+                root.parent,
+                "belief",
+                {
+                    "phase": "belief",
+                    "selected_checkpoint": str(promoted_checkpoint),
+                    "attempts": [asdict(a) for a in attempts],
+                    "targets": {
+                        "card_owner_acc": thresholds.belief_hidden_acc,
+                        "constraint_consistency": thresholds.belief_consistency,
+                        "void_suit_acc": 0.55,
+                        "half_pair_acc": 0.55,
+                        "calibration_score": 0.45,
+                    },
+                },
+            )
+            return promoted_checkpoint, attempts
+    _write_phase_report(
+        root.parent,
+        "belief",
+        {
+            "phase": "belief",
+            "attempts": [asdict(a) for a in attempts],
+            "failed": True,
+        },
+    )
+    raise PhaseValidationError(f"belief phase failed semantic validation after {max_retries} attempts")
 
 
 def _validate_joint_manifest(manifest_path: str | Path, thresholds: TaskThresholds) -> tuple[bool, dict[str, float]]:
@@ -267,6 +426,7 @@ def run_autorun(
     )
 
     current_manifest = human_manifest
+    joint_passed = False
     for attempt in range(1, max_joint_attempts + 1):
         sim_data = data_root / f"joint_cycle_{attempt:03d}.ndjson"
         generate_selfplay_dataset(
@@ -275,6 +435,26 @@ def run_autorun(
             games=selfplay_games_per_cycle,
             seed_start=selfplay_seed_start + (attempt - 1) * selfplay_games_per_cycle,
         )
+        coverage_ok, coverage_metrics = _validate_selfplay_coverage(sim_data, thresholds)
+        if not coverage_ok:
+            phase_history.append(
+                asdict(
+                    PhaseAttemptResult(
+                        phase="joint_coverage",
+                        attempt=attempt,
+                        metrics=coverage_metrics,
+                        passed=False,
+                    )
+                )
+            )
+            _write_progress(
+                root,
+                {
+                    "phase_history": phase_history,
+                    "current_manifest": str(current_manifest),
+                },
+            )
+            continue
         current_manifest = run_joint_training(
             base_manifest_path=current_manifest,
             sim_data_path=str(sim_data),
@@ -310,7 +490,13 @@ def run_autorun(
             },
         )
         if passed:
+            joint_passed = True
             break
+
+    if not joint_passed:
+        raise PhaseValidationError(
+            f"joint phase failed semantic validation after {max_joint_attempts} attempts"
+        )
 
     return current_manifest
 

@@ -104,6 +104,8 @@ Current baseline tests include:
    - `ml/tests/test_four_model_governance.py`
 22. Joint-trainer governance metadata propagation:
    - `ml/tests/test_train_four_model_joint.py`
+23. Autorun strict phase-validation / retry / self-play-coverage tests:
+   - `ml/tests/test_train_four_model_autorun.py`
 
 ## 4. CI Gate Requirements
 
