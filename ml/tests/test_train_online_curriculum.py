@@ -5,54 +5,70 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from train_online import _select_curriculum
+from train_online import (
+    _allocate_remaining_rounds_by_phase,
+    _build_phase_plan,
+    _phase_start_trick,
+)
 
 
 class TrainOnlineCurriculumTest(unittest.TestCase):
-    def test_curriculum_boundaries_match_50_10_40_split(self):
-        # first 50% => trick-play
-        phase, start = _select_curriculum(0.00, 0)
-        self.assertEqual(phase, "trick")
-        self.assertTrue(1 <= int(start) <= 9)
-
-        phase, start = _select_curriculum(0.49, 5)
-        self.assertEqual(phase, "trick")
-        self.assertTrue(1 <= int(start) <= 9)
-
-        # next 5% => passing
-        phase, start = _select_curriculum(0.50, 0)
-        self.assertEqual(phase, "passing")
-        self.assertEqual(start, 0)
-
-        phase, start = _select_curriculum(0.549, 0)
-        self.assertEqual(phase, "passing")
-        self.assertEqual(start, 0)
-
-        # next 5% => bidding
-        phase, start = _select_curriculum(0.55, 0)
-        self.assertEqual(phase, "bidding_prop")
-        self.assertEqual(start, -1)
-
-        phase, start = _select_curriculum(0.599, 0)
-        self.assertEqual(phase, "bidding_prop")
-        self.assertEqual(start, -1)
-
-        # last 40% => full game sequence
-        phase, start = _select_curriculum(0.60, 0)
-        self.assertEqual(phase, "full_game")
-        self.assertIsNone(start)
-
-        phase, start = _select_curriculum(0.95, 0)
-        self.assertEqual(phase, "full_game")
-        self.assertIsNone(start)
+    def test_phase_plan_matches_40_5_5_50_split(self):
+        phase_plan = _build_phase_plan(
+            total_rounds=645,
+            trick_frac=0.40,
+            passing_frac=0.05,
+            bidding_frac=0.05,
+        )
+        self.assertEqual(phase_plan["trick"], 258)
+        self.assertEqual(phase_plan["passing"], 32)
+        self.assertEqual(phase_plan["bidding_prop"], 32)
+        self.assertEqual(phase_plan["full_game"], 323)
 
     def test_trick_target_cycles_through_1_to_9(self):
-        seen = set()
-        for rnd in range(18):
-            phase, start = _select_curriculum(0.25, rnd)
-            self.assertEqual(phase, "trick")
-            seen.add(int(start))
+        seen = {_phase_start_trick("trick", rnd + 1) for rnd in range(18)}
         self.assertEqual(seen, set(range(1, 10)))
+        self.assertEqual(_phase_start_trick("passing", 1), 0)
+        self.assertEqual(_phase_start_trick("bidding_prop", 1), -1)
+        self.assertIsNone(_phase_start_trick("full_game", 1))
+
+    def test_remaining_round_allocation_extends_last_phase_after_early_transition(self):
+        phase_plan = {
+            "trick": 258,
+            "passing": 32,
+            "bidding_prop": 32,
+            "full_game": 323,
+        }
+        alloc = _allocate_remaining_rounds_by_phase(
+            phase_plan,
+            current_phase_idx=3,
+            current_phase_local_round=8,
+            rounds_left=501,
+        )
+        self.assertEqual(sum(alloc.values()), 501)
+        self.assertEqual(alloc["trick"], 0)
+        self.assertEqual(alloc["passing"], 0)
+        self.assertEqual(alloc["bidding_prop"], 0)
+        self.assertEqual(alloc["full_game"], 501)
+
+    def test_remaining_round_allocation_matches_standard_plan_without_early_transition(self):
+        phase_plan = {
+            "trick": 258,
+            "passing": 32,
+            "bidding_prop": 32,
+            "full_game": 323,
+        }
+        alloc = _allocate_remaining_rounds_by_phase(
+            phase_plan,
+            current_phase_idx=0,
+            current_phase_local_round=78,
+            rounds_left=567,
+        )
+        self.assertEqual(sum(alloc.values()), 567)
+        self.assertEqual(alloc["trick"], 180)
+        self.assertEqual(alloc["passing"], 32)
+        self.assertEqual(alloc["bidding_prop"], 32)
+        self.assertEqual(alloc["full_game"], 323)
 
 
 if __name__ == "__main__":

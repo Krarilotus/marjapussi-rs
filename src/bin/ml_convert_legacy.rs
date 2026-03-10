@@ -13,6 +13,10 @@ use marjapussi::game::gamestate::GamePhase;
 use marjapussi::game::player::PlaceAtTable;
 use marjapussi::game::Game;
 use marjapussi::ml::observation::{build_observation, card_index, ObservationJson};
+use marjapussi::ml::state::{
+    build_canonical_belief_targets, build_canonical_state_from_observation, CanonicalBeliefTargets,
+    CanonicalState,
+};
 use marjapussi::ml::pass_selection::{
     build_pick_legal_actions, collect_pass_options, PASS_PICK_TARGET,
 };
@@ -37,6 +41,8 @@ struct LegacyGameDataset {
 #[derive(Debug)]
 struct DecisionPoint {
     obs: ObservationJson,
+    canonical_state: CanonicalState,
+    belief_targets: CanonicalBeliefTargets,
     action_idx: usize,
     pov_parity: u8,
     pov_seat: u8,
@@ -413,9 +419,15 @@ fn record_decision(game: &Game, action: &GameAction) -> Result<DecisionPoint, St
     let action_idx = find_action_index(game, action).ok_or_else(|| {
         illegal_action_error(game, action)
     })?;
-    let obs = ObservationJson::from(build_observation(game, action.player.clone()));
+    let pov = action.player.clone();
+    let built_obs = build_observation(game, pov.clone());
+    let obs = ObservationJson::from(&built_obs);
+    let canonical_state = build_canonical_state_from_observation(game, &pov, &built_obs);
+    let belief_targets = build_canonical_belief_targets(game, pov.clone(), Some(&built_obs));
     Ok(DecisionPoint {
         obs,
+        canonical_state,
+        belief_targets,
         action_idx,
         pov_parity: action.player.0 % 2,
         pov_seat: action.player.0,
@@ -465,13 +477,17 @@ fn record_pass_pick_decisions(game: &Game, pass_action: &GameAction) -> Result<V
                 )
             })?;
 
-        let mut obs = ObservationJson::from(build_observation(game, pass_action.player.clone()));
+        let pov = pass_action.player.clone();
+        let built_obs = build_observation(game, pov.clone());
+        let mut obs = ObservationJson::from(&built_obs);
         obs.legal_actions = legal_pick_actions;
         obs.pass_selection_indices = selected.clone();
         obs.pass_selection_target = PASS_PICK_TARGET;
 
         decisions.push(DecisionPoint {
             obs,
+            canonical_state: build_canonical_state_from_observation(game, &pov, &built_obs),
+            belief_targets: build_canonical_belief_targets(game, pov.clone(), Some(&built_obs)),
             action_idx,
             pov_parity: pass_action.player.0 % 2,
             pov_seat: pass_action.player.0,
@@ -503,6 +519,7 @@ fn illegal_action_error(game: &Game, action: &GameAction) -> String {
 fn replay_legacy_game(
     record: &LegacyGameRecord,
     allowed_players: Option<&HashSet<String>>,
+    player_winrates: Option<&HashMap<String, f64>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut game = build_seeded_game(record)?;
     let mut pass_collect: Vec<String> = Vec::new();
@@ -624,6 +641,9 @@ fn replay_legacy_game(
             .get(pov_seat_idx)
             .cloned()
             .unwrap_or_else(|| format!("seat_{pov_seat_idx}"));
+        let pov_player_winrate = player_winrates
+            .and_then(|rates| rates.get(&pov_player).copied())
+            .unwrap_or(0.5);
         if let Some(allowed) = allowed_players {
             if !allowed.contains(&pov_player) {
                 continue;
@@ -636,12 +656,15 @@ fn replay_legacy_game(
         };
         rows.push(serde_json::json!({
             "obs": dp.obs,
+            "canonical_state": dp.canonical_state,
+            "belief_targets": dp.belief_targets,
             "action_taken": dp.action_idx,
             "outcome_pts_my_team": my_pts,
             "outcome_pts_opp": opp_pts,
             "source": "human_legacy",
             "game_id": game_id,
             "pov_player": pov_player,
+            "pov_player_winrate": pov_player_winrate,
             "pov_seat": dp.pov_seat,
         }));
     }
@@ -702,8 +725,9 @@ fn main() {
         }
     };
     let total = limit.unwrap_or(records.len()).min(records.len());
+    let player_winrates = compute_player_winrates(&records, total);
     let allowed_players: Option<HashSet<String>> = min_player_winrate.map(|thr| {
-        let winrates = compute_player_winrates(&records, total);
+        let winrates = &player_winrates;
         let mut ranked: Vec<(String, f64)> = winrates
             .iter()
             .map(|(name, wr)| (name.clone(), *wr))
@@ -754,7 +778,7 @@ fn main() {
     let mut rows_written = 0usize;
 
     for (idx, record) in records.into_iter().take(total).enumerate() {
-        match replay_legacy_game(&record, allowed_players.as_ref()) {
+        match replay_legacy_game(&record, allowed_players.as_ref(), Some(&player_winrates)) {
             Ok(rows) => {
                 ok_games += 1;
                 rows_written += rows.len();

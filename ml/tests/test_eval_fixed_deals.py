@@ -1,16 +1,23 @@
 import unittest
 import sys
 from pathlib import Path
+import tempfile
+
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from eval_fixed_deals import (
+    LoadedFourModel,
+    load_policy_artifact,
     normalize_fixed_hands,
     parse_card_spec,
     resolve_start_hands,
     summarize_outcomes,
 )
+from belief_model import BeliefNet
+from decision_model import BiddingNet, PassingNet, PlayingNet
 
 
 class EvalFixedDealsHelpersTest(unittest.TestCase):
@@ -100,6 +107,45 @@ class EvalFixedDealsHelpersTest(unittest.TestCase):
         ]
         out = resolve_start_hands(None, debug_hands)
         self.assertEqual(out, debug_hands)
+
+    def test_load_policy_artifact_accepts_four_model_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            belief_path = tmp_path / "belief.pt"
+            bidding_path = tmp_path / "bidding.pt"
+            passing_path = tmp_path / "passing.pt"
+            playing_path = tmp_path / "playing.pt"
+            manifest_path = tmp_path / "manifest.json"
+
+            torch.save({"state_dict": BeliefNet().state_dict()}, belief_path)
+            torch.save({"state_dict": BiddingNet().state_dict()}, bidding_path)
+            torch.save({"state_dict": PassingNet().state_dict()}, passing_path)
+            torch.save({"state_dict": PlayingNet().state_dict()}, playing_path)
+            manifest_path.write_text(
+                (
+                    "{"
+                    "\"data_path\":\"ml/data/human_dataset.ndjson\","
+                    "\"device\":\"cpu\","
+                    "\"workers\":1,"
+                    "\"decision_stages\":["
+                    "{\"task\":\"bidding\",\"epochs\":1,\"batch\":8,\"target_acc\":0.5},"
+                    "{\"task\":\"passing\",\"epochs\":1,\"batch\":8,\"target_acc\":0.5},"
+                    "{\"task\":\"playing\",\"epochs\":1,\"batch\":8,\"target_acc\":0.5}"
+                    "],"
+                    "\"belief_stage\":{\"epochs\":1,\"batch\":8,\"target_hidden_acc\":0.7},"
+                    "\"outputs\":{"
+                    f"\"bidding\":\"{bidding_path.as_posix()}\","
+                    f"\"passing\":\"{passing_path.as_posix()}\","
+                    f"\"playing\":\"{playing_path.as_posix()}\","
+                    f"\"belief\":\"{belief_path.as_posix()}\""
+                    "}"
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_policy_artifact(manifest_path, torch.device("cpu"), strict_param_budget=0)
+            self.assertIsInstance(loaded, LoadedFourModel)
 
 
 if __name__ == "__main__":

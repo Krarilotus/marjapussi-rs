@@ -27,7 +27,115 @@ Training quality logs (v2):
   - passing/play: playing-vs-defending trick split, trump-call ratio vs possible pairs
   - extra quality: schwarz rate, first-trick win rate for playing party, question pressure
 
+Legacy note:
+
+- `ml/train_online.py` and the PPO-centric recipes are now compatibility workflows.
+- New development should target the four-model neurosymbolic stack documented below.
+
 A deep RL + Transformer approach to learning Marjapussi, trained from endgame outward.
+
+## Canonical Neurosymbolic State
+
+The repo now contains an explicit structured state representation for the next
+training architecture:
+
+- Rust builder: `src/ml/state.rs`
+- monotonic inference scaffold: `src/ml/inference/state.rs`
+- Human replay export path: `src/bin/ml_convert_legacy.rs`
+- Python parser: `ml/neurosymbolic_state.py`
+
+This state is intentionally:
+
+1. structured and debuggable,
+2. authoritative where symbolic inference is certain,
+3. compatible with future belief-model supervision.
+
+Human replay conversion now emits an additional top-level field:
+
+- `canonical_state`
+- `belief_targets`
+
+Existing observation-based training code continues to work because the original
+`obs` payload is unchanged.
+
+Live Rust/Python transport now also carries:
+
+- `canonical_state`
+- `belief_targets` (when labels are enabled)
+
+This means:
+
+- `ml/env.py` now preserves structured state in live observations
+- `ml/four_model_runtime.py` can run directly on live env payloads
+- `ml/eval_fixed_deals.py` and `ml/ui_server.py` can load either:
+  - legacy `.pt` checkpoints
+  - four-model manifest `.json` bundles
+
+New fast belief pretraining path:
+
+- model: `ml/belief_model.py`
+- dataset bridge: `ml/neurosymbolic_dataset.py`
+- constrained decoder: `ml/belief_decoder.py`
+- trainer: `ml/train_belief_from_dataset.py`
+- recipe: `just pretrain-belief-human`
+
+Decision-model foundation now exists separately:
+
+- combined decision-state compiler: `ml/decision_state.py`
+- separate model classes:
+  - `ml/decision_model.py::BiddingNet`
+  - `ml/decision_model.py::PassingNet`
+  - `ml/decision_model.py::PlayingNet`
+- decision-model human pretrainer:
+  - `ml/train_decision_from_dataset.py`
+  - `just pretrain-decision-human task=bidding`
+  - `just pretrain-decision-human task=passing`
+  - `just pretrain-decision-human task=playing`
+- stage-1 four-model human orchestrator:
+  - `ml/train_four_model_human_pretrain.py`
+  - `just pretrain-four-model-human`
+- four-model manifest/runtime utilities:
+  - `ml/four_model_manifest.py`
+  - `ml/check_four_model_manifest.py`
+  - `just check-four-model-manifest`
+- lightweight runtime benchmark:
+  - `ml/benchmark_four_model_runtime.py`
+  - `just benchmark-four-model-runtime`
+- runtime bridge:
+  - `ml/four_model_runtime.py`
+  - loads manifest + four-model bundle
+  - wires `BeliefModel` decoding into the separate decision-state compiler
+- asymmetrical joint-phase scheduler primitive:
+  - `ml/four_model_schedule.py`
+- behavior-aware checkpoint scoring primitive:
+  - `ml/behavior_score.py`
+- simulated-only joint coordinator:
+  - `ml/train_four_model_joint.py`
+  - `just train-four-model-joint`
+  - supports behavior-aware fixed-suite governance:
+    - writes `governance/last_fixed_suite_eval.json`
+    - promotes `governance/best_fixed_suite_manifest.json`
+- simulated self-play dataset generator for the four-model stack:
+  - `ml/generate_four_model_selfplay.py`
+  - `just generate-four-model-selfplay`
+- convenience end-to-end joint step:
+  - `ml/train_four_model_endtoend.py`
+  - `just train-four-model-endtoend`
+  - can run fixed-suite governance every cycle via `--fixed-suite`
+- manifest-aware evaluation / UI:
+  - `just eval-fixed checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json`
+  - `just eval-fixed-four-model manifest=...`
+  - `just ui checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json`
+
+Recommended new-stack flow:
+
+1. `just pretrain-four-model-human data=ml/data/human_dataset_canonical.ndjson`
+2. `just generate-four-model-selfplay manifest=ml/checkpoints/four_model_human/human_pretrain_manifest.json output=ml/data/four_model_selfplay.ndjson games=64`
+3. `just train-four-model-joint manifest=ml/checkpoints/four_model_human/human_pretrain_manifest.json data=ml/data/four_model_selfplay.ndjson`
+4. inspect:
+   - `ml/checkpoints/four_model_joint/joint_manifest.json`
+   - `ml/checkpoints/four_model_joint/governance/last_fixed_suite_eval.json`
+   - `ml/checkpoints/four_model_joint/governance/best_fixed_suite_manifest.json`
 
 ---
 

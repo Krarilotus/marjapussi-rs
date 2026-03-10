@@ -1,5 +1,5 @@
 """
-Iterative Online Training for Marjapussi AI
+Legacy monolithic iterative online training for Marjapussi AI.
 ============================================
 Each round:
   1. Play N games with the CURRENT model (quality improves every round)
@@ -14,6 +14,9 @@ Usage:
 
 Recommended starting point:
   python ml/train_online.py --rounds 100 --games-per-round 200 --workers 8 --mc-rollouts 4 --device cuda
+
+This trainer is kept for compatibility and historical baselines.
+New development should prefer the four-model neurosymbolic stack.
 """
 
 from __future__ import annotations
@@ -216,6 +219,88 @@ def _build_phase_plan(
         "bidding_prop": bidding_rounds,
         "full_game": full_rounds,
     }
+
+
+def _phase_round_game_count(
+    base_games_per_round: int,
+    phase_game_overrides: dict[str, int],
+    phase: str,
+) -> int:
+    return _phase_override(base_games_per_round, int(phase_game_overrides.get(phase, 0)))
+
+
+def _allocate_remaining_rounds_by_phase(
+    phase_plan: dict[str, int],
+    current_phase_idx: int,
+    current_phase_local_round: int,
+    rounds_left: int,
+) -> dict[str, int]:
+    remaining = {phase: 0 for phase in PHASE_ORDER}
+    rounds_left = max(0, int(rounds_left))
+    if rounds_left <= 0:
+        return remaining
+
+    current_phase_idx = max(0, min(int(current_phase_idx), len(PHASE_ORDER) - 1))
+    current_phase_local_round = max(0, int(current_phase_local_round))
+
+    for idx, phase in enumerate(PHASE_ORDER):
+        planned = max(0, int(phase_plan.get(phase, 0)))
+        if idx < current_phase_idx:
+            continue
+        if idx == current_phase_idx:
+            remaining[phase] = max(0, planned - current_phase_local_round)
+        else:
+            remaining[phase] = planned
+
+    planned_total = sum(remaining.values())
+    if planned_total < rounds_left:
+        remaining[PHASE_ORDER[-1]] += rounds_left - planned_total
+    elif planned_total > rounds_left:
+        overflow = planned_total - rounds_left
+        for phase in reversed(PHASE_ORDER[current_phase_idx:]):
+            if overflow <= 0:
+                break
+            reducible = min(overflow, remaining[phase])
+            remaining[phase] -= reducible
+            overflow -= reducible
+
+    return remaining
+
+
+def _estimate_remaining_eta_seconds(
+    *,
+    phase_plan: dict[str, int],
+    current_phase_idx: int,
+    current_phase_local_round: int,
+    rounds_left: int,
+    base_games_per_round: int,
+    phase_game_overrides: dict[str, int],
+    phase_runtime_stats: dict[str, dict[str, float]],
+    fallback_sec_per_game: float,
+) -> float:
+    remaining_rounds = _allocate_remaining_rounds_by_phase(
+        phase_plan,
+        current_phase_idx,
+        current_phase_local_round,
+        rounds_left,
+    )
+    fallback = max(0.0, float(fallback_sec_per_game))
+    eta_seconds = 0.0
+    for phase in PHASE_ORDER:
+        phase_rounds_left = int(remaining_rounds.get(phase, 0))
+        if phase_rounds_left <= 0:
+            continue
+        games_per_round = _phase_round_game_count(base_games_per_round, phase_game_overrides, phase)
+        phase_games_left = phase_rounds_left * max(1, int(games_per_round))
+        stats = phase_runtime_stats.get(phase, {})
+        phase_games_seen = float(stats.get("games", 0.0))
+        phase_secs_seen = float(stats.get("secs", 0.0))
+        if phase_games_seen > 0.0 and phase_secs_seen > 0.0:
+            sec_per_game = phase_secs_seen / phase_games_seen
+        else:
+            sec_per_game = fallback
+        eta_seconds += phase_games_left * sec_per_game
+    return eta_seconds
 
 
 def _phase_start_trick(phase: str, phase_local_round: int) -> int | None:
@@ -1275,8 +1360,12 @@ def train_online(
     points_normalizer: float = 420.0,
     passgame_base_reward: float = 115.0 / 420.0,
     passgame_margin_weight: float = 0.25,
+    pass_game_penalty: float = 0.0,
     no_contract_penalty: float = 0.35,
     step_delta_scale: float = 1.0 / 420.0,
+    pass_collapse_threshold: float = 0.95,
+    pass_collapse_patience: int = 2,
+    pass_collapse_min_full_rounds: int = 32,
     checkpoints_dir: str | Path = DEFAULT_CKPT_DIR,
     runs_dir: str | Path = DEFAULT_RUNS_DIR,
 ):
@@ -1307,6 +1396,7 @@ def train_online(
         points_normalizer=points_normalizer,
         passgame_base_reward=passgame_base_reward,
         passgame_margin_weight=passgame_margin_weight,
+        pass_game_penalty=pass_game_penalty,
         no_contract_penalty=no_contract_penalty,
         step_delta_scale=step_delta_scale,
     )
@@ -1403,6 +1493,7 @@ def train_online(
         f"Reward knobs: points_norm={reward_cfg.points_normalizer:.1f}, "
         f"passgame_base={reward_cfg.passgame_base_reward:.4f}, "
         f"passgame_margin_w={reward_cfg.passgame_margin_weight:.3f}, "
+        f"pass_game_penalty={reward_cfg.pass_game_penalty:.3f}, "
         f"no_contract_penalty={reward_cfg.no_contract_penalty:.3f}, "
         f"step_delta_scale={reward_cfg.step_delta_scale:.6f}"
     )
@@ -1472,6 +1563,19 @@ def train_online(
     phase_no_improve = 0
     phase_best_loss = float("inf")
     games_played_total = 0
+    pass_collapse_streak = 0
+    stop_requested = False
+    stop_reason = ""
+    phase_game_overrides = {
+        "trick": phase_trick_games_per_round,
+        "passing": phase_passing_games_per_round,
+        "bidding_prop": phase_bidding_games_per_round,
+        "full_game": phase_full_games_per_round,
+    }
+    phase_runtime_stats = {
+        phase: {"secs": 0.0, "games": 0.0}
+        for phase in PHASE_ORDER
+    }
     sim_infer_device = device if str(device).startswith("cuda") else "cpu"
     sim_model, _ = create_model(
         model_family=model_meta.get("model_family", "parallel_v2"),
@@ -1773,15 +1877,28 @@ def train_online(
         avg_loss = {k: v / max(n_steps, 1) for k, v in loss_acc.items()}
         train_time = time.time() - t1
         round_quality = _aggregate_round_quality_metrics(episode_metrics)
+        round_total_time = gen_time + train_time
+        phase_stats = phase_runtime_stats.setdefault(train_phase, {"secs": 0.0, "games": 0.0})
+        phase_stats["secs"] += float(round_total_time)
+        phase_stats["games"] += float(round_games)
 
         # ── Summary ──────────────────────────────────────────────────────────
         policy_label = "heuristic" if stage == 0 else f"model-v{rnd+1}"
         rate = round_games / gen_time
         Log.success(f"Round {rnd+1:3d} Summary:")
         elapsed_run = time.time() - train_start
-        avg_round_time = elapsed_run / max(local_round, 1)
         rounds_left = max(0, local_total_rounds - local_round)
-        eta_run = avg_round_time * rounds_left
+        fallback_sec_per_game = elapsed_run / max(1, games_played_total)
+        eta_run = _estimate_remaining_eta_seconds(
+            phase_plan=phase_plan,
+            current_phase_idx=phase_idx,
+            current_phase_local_round=phase_local_round,
+            rounds_left=rounds_left,
+            base_games_per_round=games_per_round,
+            phase_game_overrides=phase_game_overrides,
+            phase_runtime_stats=phase_runtime_stats,
+            fallback_sec_per_game=fallback_sec_per_game,
+        )
         print(f"  - Policy:   {policy_label}")
         print(f"  - Phase:    {train_phase} ({phase_local_round}/{max(1, int(phase_plan.get(train_phase, 0)) or phase_local_round)})")
         print(f"  - Round:    {rnd+1}/{rounds} (local {local_round}/{local_total_rounds})")
@@ -1902,8 +2019,49 @@ def train_online(
             )
             if avg_diff > best_diff:
                 best_diff = avg_diff
-                atomic_torch_save(
-                    build_checkpoint_payload(
+                best_payload = build_checkpoint_payload(
+                    model,
+                    metadata={
+                        **model_meta,
+                        "schema_version": SUPPORTED_OBS_SCHEMA_VERSION,
+                        "action_encoding_version": 1,
+                        "action_feat_dim": ACTION_FEAT_DIM,
+                    },
+                    extra_metadata={
+                        "checkpoint_kind": "best_eval",
+                        "round": rnd + 1,
+                        "best_diff": best_diff,
+                        "eval_quality": eq,
+                    },
+                )
+                atomic_torch_save(best_payload, ckpt_dir / "best.pt")
+                atomic_torch_save(best_payload, ckpt_dir / "best_eval.pt")
+                print(f"           -> New best: {best_diff:+.1f}")
+            if train_phase == "full_game":
+                pass_game_rate = float(eq.get("pass_game_rate", 0.0))
+                if (
+                    phase_local_round >= int(pass_collapse_min_full_rounds)
+                    and pass_game_rate >= float(pass_collapse_threshold)
+                ):
+                    pass_collapse_streak += 1
+                    Log.warn(
+                        "Pass-collapse warning: "
+                        f"full_game eval pass rate {pass_game_rate:.1%} "
+                        f"(streak {pass_collapse_streak}/{max(1, int(pass_collapse_patience))})"
+                    )
+                else:
+                    pass_collapse_streak = 0
+                if (
+                    int(pass_collapse_patience) > 0
+                    and pass_collapse_streak >= int(pass_collapse_patience)
+                ):
+                    stop_requested = True
+                    stop_reason = (
+                        "pass-collapse early stop: "
+                        f"full_game eval pass rate stayed >= {float(pass_collapse_threshold):.1%} "
+                        f"for {pass_collapse_streak} evals"
+                    )
+                    collapse_payload = build_checkpoint_payload(
                         model,
                         metadata={
                             **model_meta,
@@ -1912,14 +2070,15 @@ def train_online(
                             "action_feat_dim": ACTION_FEAT_DIM,
                         },
                         extra_metadata={
-                            "checkpoint_kind": "best",
+                            "checkpoint_kind": "pass_collapse_stop",
                             "round": rnd + 1,
-                            "best_diff": best_diff,
+                            "avg_diff": avg_diff,
+                            "eval_quality": eq,
+                            "stop_reason": stop_reason,
                         },
-                    ),
-                    ckpt_dir / "best.pt",
-                )
-                print(f"           -> New best: {best_diff:+.1f}")
+                    )
+                    atomic_torch_save(collapse_payload, ckpt_dir / "pass_collapse.pt")
+                    Log.warn(stop_reason)
                 
         # 50k games checkpoint (250 rounds * 200 games/round)
         if (rnd + 1) % 250 == 0:
@@ -1967,6 +2126,8 @@ def train_online(
                 atomic_torch_save(latest_payload, named_ckpt_path)
         with open(log_path, "a") as f:
             f.write(json.dumps({"event": "update", **log_entry}) + "\n")
+        if stop_requested:
+            break
 
         # Free GPU memory and clear garbage
         del results, all_transitions
@@ -1983,6 +2144,8 @@ def train_online(
         phase_end_logged.add(final_phase)
 
     Log.success(f"Done. Best test point diff: {best_diff:+.1f}")
+    if stop_reason:
+        Log.warn(f"Training stopped early: {stop_reason}")
     Log.info(f"Checkpoint: {ckpt_dir / 'latest.pt'}")
     if named_ckpt_path is not None:
         Log.info(f"Named checkpoint: {named_ckpt_path}")
@@ -2147,10 +2310,18 @@ if __name__ == "__main__":
                    help="Terminal reward magnitude for pass games")
     p.add_argument("--passgame-margin-weight", type=float, default=0.25,
                    help="Extra weight for normalized pass-game point margin term")
+    p.add_argument("--pass-game-penalty", type=float, default=0.0,
+                   help="Flat penalty applied to every pass game")
     p.add_argument("--no-contract-penalty", type=float, default=0.35,
                    help="Flat terminal penalty applied when no one bids/plays")
     p.add_argument("--step-delta-scale", type=float, default=(1.0 / 420.0),
                    help="Scale for dense per-step point-delta reward")
+    p.add_argument("--pass-collapse-threshold", type=float, default=0.95,
+                   help="Early-stop guard: full-game eval pass-rate threshold")
+    p.add_argument("--pass-collapse-patience", type=int, default=2,
+                   help="Early-stop guard: consecutive eval count before stopping")
+    p.add_argument("--pass-collapse-min-full-rounds", type=int, default=32,
+                   help="Early-stop guard: minimum local full-game rounds before activation")
     p.add_argument("--checkpoints-dir", default=str(DEFAULT_CKPT_DIR),
                    help="Directory for saving checkpoints (latest/best/round)")
     p.add_argument("--runs-dir", default=str(DEFAULT_RUNS_DIR),
@@ -2241,8 +2412,12 @@ if __name__ == "__main__":
         points_normalizer=args.points_normalizer,
         passgame_base_reward=args.passgame_base_reward,
         passgame_margin_weight=args.passgame_margin_weight,
+        pass_game_penalty=args.pass_game_penalty,
         no_contract_penalty=args.no_contract_penalty,
         step_delta_scale=args.step_delta_scale,
+        pass_collapse_threshold=args.pass_collapse_threshold,
+        pass_collapse_patience=args.pass_collapse_patience,
+        pass_collapse_min_full_rounds=args.pass_collapse_min_full_rounds,
         checkpoints_dir=args.checkpoints_dir,
         runs_dir=args.runs_dir,
     )

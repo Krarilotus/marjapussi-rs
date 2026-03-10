@@ -15,7 +15,10 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from model import ACTION_FEAT_DIM, build_card_features_batch, NUM_CARDS
+try:
+    from model import ACTION_FEAT_DIM, build_card_features_batch, NUM_CARDS
+except ModuleNotFoundError:
+    from .model import ACTION_FEAT_DIM, build_card_features_batch, NUM_CARDS
 
 SUPPORTED_OBS_SCHEMA_VERSION = 1
 
@@ -73,6 +76,15 @@ def _send(proc: subprocess.Popen, msg: dict) -> dict:
              err = proc.stderr.read() if proc.stderr else "No stderr"
              raise RuntimeError(f"ml_server (PID {proc.pid}) exited with {proc.returncode}. Stderr: {err}") from e
         raise e
+
+
+def _merge_response_state(obs: dict, resp: dict) -> dict:
+    merged = dict(obs)
+    if resp.get("canonical_state") is not None:
+        merged["canonical_state"] = resp["canonical_state"]
+    if resp.get("belief_targets") is not None:
+        merged["belief_targets"] = resp["belief_targets"]
+    return merged
 
 
 class MarjapussiEnv:
@@ -177,7 +189,7 @@ class MarjapussiEnv:
             raise RuntimeError(resp["message"])
         if "obs" not in resp:
             raise RuntimeError(f"Invalid new_game response keys: {sorted(resp.keys())}")
-        self._obs = resp["obs"]
+        self._obs = _merge_response_state(resp["obs"], resp)
         self._labels = resp.get("labels")
         self._done = resp.get("done", False)
         return self._obs
@@ -188,7 +200,7 @@ class MarjapussiEnv:
         if resp.get("type") == "error":
             raise RuntimeError(resp["message"])
         if "obs" in resp:
-            self._obs = resp["obs"]
+            self._obs = _merge_response_state(resp["obs"], resp)
         elif resp.get("type") == "done":
             # Backward compatibility for older server responses.
             # Keep last observation so callers can still render terminal state.
@@ -215,7 +227,7 @@ class MarjapussiEnv:
             raise RuntimeError(resp["message"])
         if "obs" not in resp:
             raise RuntimeError(f"Invalid debug_pass response keys: {sorted(resp.keys())}")
-        self._obs = resp["obs"]
+        self._obs = _merge_response_state(resp["obs"], resp)
         self._labels = resp.get("labels")
         self._done = resp.get("done", False)
         info = resp.get("outcome") or {}
@@ -232,7 +244,7 @@ class MarjapussiEnv:
         if "obs" not in resp:
             raise RuntimeError(f"Invalid observe response keys: {sorted(resp.keys())}")
         self._labels = resp.get("labels")
-        return resp["obs"]
+        return _merge_response_state(resp["obs"], resp)
 
     def observe_pov(self, pov: int) -> dict:
         """Observe current state from an arbitrary seat POV without changing env.pov."""

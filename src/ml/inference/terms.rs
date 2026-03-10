@@ -27,6 +27,17 @@ pub enum HalfConstraint {
     RequireBoth,
 }
 
+impl HalfConstraint {
+    pub fn strongest(self, other: Self) -> Self {
+        use HalfConstraint::*;
+        match (self, other) {
+            (RequireBoth, _) | (_, RequireBoth) => RequireBoth,
+            (RequireAtLeastOne, _) | (_, RequireAtLeastOne) => RequireAtLeastOne,
+            _ => Unknown,
+        }
+    }
+}
+
 pub fn pair_card_indices(suit_idx: usize) -> (usize, usize) {
     (
         suit_idx * CARDS_PER_SUIT + OBER_VALUE_INDEX,

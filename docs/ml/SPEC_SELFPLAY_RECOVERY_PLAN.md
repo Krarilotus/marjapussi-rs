@@ -1,5 +1,7 @@
 # Self-Play Recovery Plan
 
+Deprecated: this plan is superseded by [SPEC_FOUR_MODEL_NEUROSYMBOLIC_SYSTEM.md](/c:/Users/Johannes/Documents/marjapussi-rs/docs/ml/SPEC_FOUR_MODEL_NEUROSYMBOLIC_SYSTEM.md) and remains only as historical context for the pass-collapse recovery work.
+
 ## Context
 - Current online training can collapse into a low-risk `pass` equilibrium late in `full_game`.
 - The existing codebase already has strong observation features, hidden-state supervision, and parallel GPU inference.

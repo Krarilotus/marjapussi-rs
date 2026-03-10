@@ -2,11 +2,17 @@
 
 This module is the set-theory inference engine used by ML observations.
 
+It now also serves as the authoritative symbolic core for the structured
+neurosymbolic state exported by `src/ml/state.rs`.
+
 ## Entry Point
 
 - `apply_hidden_set_constraints(...)`
   - File: `src/ml/inference/engine.rs`
   - Called from: `src/ml/observation.rs` in `build_observation(...)`
+- `InferenceState`
+  - File: `src/ml/inference/state.rs`
+  - Purpose: explicit monotonic/delta-friendly symbolic inference state wrapper for the four-model pipeline
 
 ## Terminology Mapping (Code -> Game Meaning)
 
@@ -58,3 +64,36 @@ Keep each rule:
 - local (single responsibility)
 
 That keeps the inference calculus readable and testable.
+
+## Relationship To Canonical State
+
+- `src/ml/state.rs`
+  - builds the structured `CanonicalState`
+  - reuses observation-derived hidden-hand knowledge
+  - lifts the low-level masks into:
+    - card section
+    - player section
+    - team section
+    - strategy/meta section
+
+This keeps the fast mask-level inference small and cache-friendly while exposing
+an interpretable higher-level state to dataset conversion and future model
+pipelines.
+
+## Delta-Oriented API
+
+`InferenceState` is the first explicit Layer-2 scaffold for the new
+neurosymbolic stack.
+
+It provides:
+
+- persistent `possible`, `confirmed`, and `half_constraints` masks
+- `InferenceDelta` for monotonic updates
+- explicit played-card projection
+- helpers for:
+  - `possible_hidden_rel(card_idx)`
+  - `confirmed_hidden_rel(card_idx)`
+  - `void_suits()`
+
+This keeps the authoritative symbolic state in Rust and avoids pushing rule
+maintenance into Python or into the models themselves.

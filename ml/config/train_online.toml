@@ -1,4 +1,5 @@
-# Online training defaults for ml/train_online.py
+# Legacy monolithic online-training defaults for ml/train_online.py.
+# The preferred new path is the four-model neurosymbolic stack.
 # CLI flags override these values.
 
 # --- Core loop ---

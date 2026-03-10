@@ -15,6 +15,10 @@ use crate::ml::pass_selection::{
     PassSelectionState, PASS_PICK_TARGET,
 };
 use crate::ml::sim::{heuristic_policy, random_policy, run_to_end, try_all_actions};
+use crate::ml::state::{
+    build_canonical_belief_targets, build_canonical_state_from_observation, CanonicalBeliefTargets,
+    CanonicalState,
+};
 use crate::ml::search::TtEntry;
 use std::collections::HashMap;
 
@@ -98,6 +102,10 @@ pub enum Response {
         done: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         labels: Option<ObservationTrainLabelsJson>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        canonical_state: Option<CanonicalState>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        belief_targets: Option<CanonicalBeliefTargets>,
         #[serde(skip_serializing_if = "Option::is_none")]
         outcome: Option<OutcomeJson>,
     },
@@ -374,7 +382,12 @@ impl Server {
         &mut self,
         game: &Game,
         pov: PlaceAtTable,
-    ) -> (ObservationJson, Option<ObservationTrainLabelsJson>) {
+    ) -> (
+        ObservationJson,
+        Option<ObservationTrainLabelsJson>,
+        Option<CanonicalState>,
+        Option<CanonicalBeliefTargets>,
+    ) {
         let pass_options = self.pass_options_for_turn(game, pov.clone());
         let mut obs_full = build_observation(game, pov.clone());
         if let Some(options) = pass_options {
@@ -387,10 +400,24 @@ impl Server {
         } else {
             None
         };
-        (ObservationJson::from(&obs_full), labels)
+        let canonical_state = Some(build_canonical_state_from_observation(game, &pov, &obs_full));
+        let belief_targets = if self.include_labels {
+            Some(build_canonical_belief_targets(game, pov, Some(&obs_full)))
+        } else {
+            None
+        };
+        (ObservationJson::from(&obs_full), labels, canonical_state, belief_targets)
     }
 
-    fn build_obs_payload(&mut self, game: &Game) -> (ObservationJson, Option<ObservationTrainLabelsJson>) {
+    fn build_obs_payload(
+        &mut self,
+        game: &Game,
+    ) -> (
+        ObservationJson,
+        Option<ObservationTrainLabelsJson>,
+        Option<CanonicalState>,
+        Option<CanonicalBeliefTargets>,
+    ) {
         self.build_obs_payload_for_pov(game, self.pov.clone())
     }
 
@@ -509,9 +536,9 @@ impl Server {
 
                 self.clear_pass_selection();
                 let done = game.ended();
-                let (obs, labels) = self.build_obs_payload(&game);
+                let (obs, labels, canonical_state, belief_targets) = self.build_obs_payload(&game);
                 self.game = Some(game);
-                Response::Obs { obs, done, labels, outcome: None }
+                Response::Obs { obs, done, labels, canonical_state, belief_targets, outcome: None }
             }
 
             Request::Step { action_idx } => {
@@ -528,11 +555,13 @@ impl Server {
                         }
 
                         if self.pass_selection.selected().len() < PASS_PICK_TARGET {
-                            let (obs, labels) = self.build_obs_payload(&game);
+                            let (obs, labels, canonical_state, belief_targets) = self.build_obs_payload(&game);
                             return Response::Obs {
                                 obs,
                                 done: false,
                                 labels,
+                                canonical_state,
+                                belief_targets,
                                 outcome: None,
                             };
                         }
@@ -558,14 +587,14 @@ impl Server {
                         self.clear_pass_selection();
 
                         let done = next.ended();
-                        let (obs, labels) = self.build_obs_payload(&next);
+                        let (obs, labels, canonical_state, belief_targets) = self.build_obs_payload(&next);
                         let outcome = if done {
                             Some(info_to_outcome(&GameFinishedInfo::from(next.clone())))
                         } else {
                             None
                         };
                         self.game = Some(next);
-                        return Response::Obs { obs, done, labels, outcome };
+                        return Response::Obs { obs, done, labels, canonical_state, belief_targets, outcome };
                     }
                     // Non-sequential fallback: allow direct legal action index during pass phase.
                     // This is used when stepping non-POV seats from observations that expose
@@ -592,14 +621,14 @@ impl Server {
                 };
                 self.clear_pass_selection();
                 let done = next.ended();
-                let (obs, labels) = self.build_obs_payload(&next);
+                let (obs, labels, canonical_state, belief_targets) = self.build_obs_payload(&next);
                 let outcome = if done {
                     Some(info_to_outcome(&GameFinishedInfo::from(next.clone())))
                 } else {
                     None
                 };
                 self.game = Some(next);
-                Response::Obs { obs, done, labels, outcome }
+                Response::Obs { obs, done, labels, canonical_state, belief_targets, outcome }
             }
 
             Request::DebugPass { card_indices } => {
@@ -638,14 +667,14 @@ impl Server {
                     };
                     self.clear_pass_selection();
                     let done = next.ended();
-                    let (obs, labels) = self.build_obs_payload(&next);
+                    let (obs, labels, canonical_state, belief_targets) = self.build_obs_payload(&next);
                     let outcome = if done {
                         Some(info_to_outcome(&GameFinishedInfo::from(next.clone())))
                     } else {
                         None
                     };
                     self.game = Some(next);
-                    Response::Obs { obs, done, labels, outcome }
+                    Response::Obs { obs, done, labels, canonical_state, belief_targets, outcome }
                 } else {
                     Response::Error { message: "Pass combination not legal for current player".into() }
                 }
@@ -657,8 +686,8 @@ impl Server {
                     None => return Response::Error { message: "No game in progress".into() },
                 };
                 let done = game.ended();
-                let (obs, labels) = self.build_obs_payload(&game);
-                Response::Obs { obs, done, labels, outcome: None }
+                let (obs, labels, canonical_state, belief_targets) = self.build_obs_payload(&game);
+                Response::Obs { obs, done, labels, canonical_state, belief_targets, outcome: None }
             }
 
             Request::ObservePov { pov } => {
@@ -667,11 +696,14 @@ impl Server {
                     None => return Response::Error { message: "No game in progress".into() },
                 };
                 let done = game.ended();
-                let (obs, _labels) = self.build_obs_payload_for_pov(&game, PlaceAtTable(pov));
+                let (obs, _labels, canonical_state, belief_targets) =
+                    self.build_obs_payload_for_pov(&game, PlaceAtTable(pov));
                 Response::Obs {
                     obs,
                     done,
                     labels: None,
+                    canonical_state,
+                    belief_targets,
                     outcome: None,
                 }
             }

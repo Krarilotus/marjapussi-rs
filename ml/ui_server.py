@@ -36,6 +36,7 @@ try:
     import torch
     import torch.nn.functional as F
 
+    from four_model_runtime import FourModelBundle, choose_action_pos_with_bundle, load_four_model_bundle
     from model import MarjapussiNet
     from model_factory import create_model, load_state_compatible, parse_checkpoint
 
@@ -43,6 +44,9 @@ try:
 except ImportError as e:
     TORCH_OK = False
     create_model = None
+    FourModelBundle = None
+    choose_action_pos_with_bundle = None
+    load_four_model_bundle = None
     load_state_compatible = None
     parse_checkpoint = None
     print(f"[warn] PyTorch not available: {e} - model controllers disabled")
@@ -234,6 +238,8 @@ class GameManager:
                 if p.name.startswith("epoch_"):
                     continue
                 files.append(p)
+            for p in root.glob("*manifest*.json"):
+                files.append(p)
 
         # De-duplicate by absolute path, newest first.
         dedup: dict[str, Path] = {}
@@ -277,6 +283,11 @@ class GameManager:
             return self.model_cache[key], label, None
 
         try:
+            if path.suffix.lower() == ".json":
+                bundle = load_four_model_bundle(path, device="cpu")
+                setattr(bundle, "_model_meta", {"model_family": "four_model"})
+                self.model_cache[key] = bundle
+                return bundle, label, None
             state, ckpt_meta, _ = parse_checkpoint(path, map_location="cpu")
             family = str(ckpt_meta.get("model_family", "parallel_v2"))
             cfg_path = ckpt_meta.get("model_config_path")
@@ -420,6 +431,20 @@ class GameManager:
                 "chosen_action_pos": 0,
                 "chosen_action_list_idx": None,
                 "chosen_label": None,
+            }
+
+        if hasattr(model, "manifest") and hasattr(model, "belief_model"):
+            chosen_pos, conf = choose_action_pos_with_bundle(model, seat_obs)
+            chosen_pos = min(chosen_pos, len(legal) - 1)
+            chosen_la = legal[chosen_pos]
+            return {
+                "probs": [],
+                "entropy": None,
+                "chosen_action_pos": chosen_pos,
+                "chosen_action_list_idx": int(chosen_la.get("action_list_idx", chosen_pos)),
+                "chosen_label": action_label(chosen_la),
+                "confidence": conf,
+                "runtime_family": "four_model",
             }
 
         tensors = obs_to_tensors(seat_obs)

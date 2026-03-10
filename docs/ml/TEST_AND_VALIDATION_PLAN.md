@@ -64,6 +64,46 @@ Current baseline tests include:
 1. Rust inference/set-theory tests in `src/ml/inference.rs`.
 2. Rust legacy-converter parser tests in `src/bin/ml_convert_legacy.rs`.
 3. Python env/reward sanity tests in `ml/tests/test_env_reward_basics.py`.
+4. Rust canonical-state tests in `src/ml/state.rs`.
+5. Rust monotonic inference-state tests in `src/ml/inference/state.rs`.
+6. Python canonical-state and belief-target tests in:
+   - `ml/tests/test_neurosymbolic_state.py`
+   - `ml/tests/test_neurosymbolic_dataset.py`
+7. Python belief-model and collation smoke tests in:
+   - `ml/tests/test_belief_model.py`
+   - `ml/tests/test_train_belief_from_dataset.py`
+8. Python decision-state / split-model interface tests in:
+   - `ml/tests/test_decision_state.py`
+   - `ml/tests/test_decision_model.py`
+   - `ml/tests/test_train_decision_from_dataset.py`
+9. Stage-1 four-model pretraining orchestrator smoke test:
+   - `ml/tests/test_train_four_model_human_pretrain.py`
+10. Runtime bridge tests:
+   - `ml/tests/test_four_model_runtime.py`
+11. Four-model manifest validation tests:
+   - `ml/tests/test_four_model_manifest.py`
+12. Lightweight runtime benchmark utility tests:
+   - `ml/tests/test_benchmark_four_model_runtime.py`
+13. Joint-schedule stability-gate tests:
+   - `ml/tests/test_four_model_schedule.py`
+14. Behavior-aware scoring tests:
+   - `ml/tests/test_behavior_score.py`
+15. Checkpoint metadata / resume tests:
+   - `ml/tests/test_checkpoint_utils.py`
+16. Simulated-only joint-training coordinator smoke tests:
+   - `ml/tests/test_train_four_model_joint.py`
+17. Manifest-aware fixed-eval tests:
+   - `ml/tests/test_eval_fixed_deals.py`
+18. Live env structured-state merge tests:
+   - `ml/tests/test_env_structured_state.py`
+19. Four-model self-play dataset generator smoke tests:
+   - `ml/tests/test_generate_four_model_selfplay.py`
+20. End-to-end four-model coordinator smoke tests:
+   - `ml/tests/test_train_four_model_endtoend.py`
+21. Fixed-suite governance selection tests:
+   - `ml/tests/test_four_model_governance.py`
+22. Joint-trainer governance metadata propagation:
+   - `ml/tests/test_train_four_model_joint.py`
 
 ## 4. CI Gate Requirements
 

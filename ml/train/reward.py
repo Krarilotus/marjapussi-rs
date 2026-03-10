@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Legacy reward path for the monolithic PPO trainer in `ml/train_online.py`.
+# The four-model neurosymbolic stack should use its own model-specific objectives.
+
 
 @dataclass(frozen=True)
 class RewardConfig:
@@ -11,6 +14,8 @@ class RewardConfig:
     passgame_base_reward: float = 115.0 / 420.0
     # Additional scaling for raw pass-game margin signal (my_pts - opp_pts)/points_normalizer.
     passgame_margin_weight: float = 0.25
+    # Flat penalty applied to every pass game to make "always pass" clearly unattractive.
+    pass_game_penalty: float = 0.0
     # Flat penalty applied to all no-contract pass games to discourage "everyone pass" equilibrium.
     no_contract_penalty: float = 0.35
     # Per-step point-delta scaling for dense intermediate reward.
@@ -92,6 +97,7 @@ def contract_reward_from_pov(
         no_contract_reward = (
             sign * cfg.passgame_base_reward
             + cfg.passgame_margin_weight * margin_norm
+            - cfg.pass_game_penalty
             - cfg.no_contract_penalty
         )
         return float(no_contract_reward), tricks_party_0, tricks_party_1, None

@@ -31,6 +31,7 @@ RUNS_DIR = ML / "runs"
 sys.path.insert(0, str(ML))
 
 from env import MarjapussiEnv, obs_to_tensors
+from four_model_runtime import FourModelBundle, choose_action_pos_with_bundle, load_four_model_bundle
 from model_factory import create_model, load_state_compatible, parse_checkpoint
 
 
@@ -66,9 +67,15 @@ class LoadedModel:
 
 
 @dataclass
+class LoadedFourModel:
+    path: Path
+    bundle: FourModelBundle
+
+
+@dataclass
 class SeatPolicy:
     mode: str  # "model" | "heuristic" | "first_legal"
-    model: LoadedModel | None = None
+    model: LoadedModel | LoadedFourModel | None = None
 
 
 class LogSink:
@@ -91,6 +98,97 @@ class LogSink:
                 )
                 safe = safe.encode(enc, errors="replace").decode(enc, errors="replace")
                 print(safe)
+
+
+def evaluate_cases(
+    cases: list[dict[str, Any]],
+    seat_policies: list[SeatPolicy],
+    *,
+    device: torch.device,
+    echo: bool = False,
+    ansi: bool = False,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    sink = LogSink(echo=echo)
+    outcomes: list[dict[str, Any]] = []
+    for case in cases:
+        info = run_case(case, seat_policies, device=device, log=sink, ansi=ansi)
+        outcomes.append(info)
+
+    summary = summarize_outcomes(outcomes)
+    sink.write("")
+    sink.write("=== SUMMARY ===")
+    sink.write(
+        f"games={summary.get('games', 0)} | "
+        f"made={summary.get('contract_made_rate', 0.0):.1%} | "
+        f"taken_won={summary.get('taken_games_won', 0)}/{summary.get('taken_games', 0)} "
+        f"({summary.get('taken_game_win_rate', 0.0):.1%}) | "
+        f"pass={summary.get('pass_game_rate', 0.0):.1%} | "
+        f"avg_bid={summary.get('avg_highest_bid', 0.0):.1f}"
+    )
+    sink.write(
+        f"tricks(play:def)={summary.get('avg_playing_tricks', 0.0):.2f}:{summary.get('avg_defending_tricks', 0.0):.2f} | "
+        f"trump_calls={summary.get('pair_called', 0)}/{summary.get('pair_possible', 0)} "
+        f"({summary.get('pair_call_rate', 0.0):.1%}) | "
+        f"avg_margin={summary.get('avg_playing_margin_points', 0.0):+.1f}"
+    )
+    sink.write(
+        f"overbid(est=140+20*pairs): games={summary.get('overbid_games', 0)} "
+        f"({summary.get('overbid_rate', 0.0):.1%}) | "
+        f"avg_over={summary.get('avg_overbid_amount', 0.0):.1f} | "
+        f"avg_bid={summary.get('avg_overbid_bid', 0.0):.1f} | "
+        f"avg_potential={summary.get('avg_overbid_potential', 0.0):.1f}"
+    )
+    sink.write(
+        f"questions->trump: {summary.get('questions_to_trump', 0)}/{summary.get('questions_total', 0)} "
+        f"({summary.get('questions_to_trump_rate', 0.0):.1%}) | "
+        f"questions_no_trump: {summary.get('questions_no_trump', 0)} "
+        f"({summary.get('questions_no_trump_rate', 0.0):.1%})"
+    )
+    sink.write(
+        f"bid>pred_pts: {summary.get('bid_over_pred_count', 0)}/{summary.get('bid_pred_count', 0)} "
+        f"({summary.get('bid_over_pred_rate', 0.0):.1%}) | "
+        f"avg_over={summary.get('avg_bid_over_pred_amount', 0.0):.1f}"
+    )
+
+    if output_path is not None:
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(sink.lines) + "\n", encoding="utf-8")
+        summary["log_path"] = str(out_path)
+    summary["outcomes"] = outcomes
+    summary["log_lines"] = list(sink.lines)
+    return summary
+
+
+def evaluate_checkpoint_suite(
+    checkpoint_path: str | Path,
+    suite_path: str | Path,
+    *,
+    device: str = "cpu",
+    strict_param_budget: int = 28_000_000,
+    max_cases: int = 0,
+    echo: bool = False,
+    ansi: bool = False,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    device_obj = choose_device(device)
+    loaded = load_policy_artifact(Path(checkpoint_path), device_obj, strict_param_budget=strict_param_budget)
+    seat_policies = [SeatPolicy(mode="model", model=loaded) for _ in range(4)]
+    cases = load_suite(Path(suite_path))
+    if max_cases > 0:
+        cases = cases[:max_cases]
+    summary = evaluate_cases(
+        cases,
+        seat_policies,
+        device=device_obj,
+        echo=echo,
+        ansi=ansi,
+        output_path=output_path,
+    )
+    summary["checkpoint_path"] = str(Path(checkpoint_path))
+    summary["suite_path"] = str(Path(suite_path))
+    return summary
 
 
 def card_idx_to_text(card_idx: int, ansi: bool = False) -> str:
@@ -281,6 +379,8 @@ def discover_checkpoints() -> list[tuple[str, Path]]:
             if p.name.startswith("epoch_"):
                 continue
             found[str(p.resolve())] = p
+        for p in root.glob("*manifest*.json"):
+            found[str(p.resolve())] = p
 
     files = sorted(found.values(), key=lambda p: p.stat().st_mtime, reverse=True)
     out: list[tuple[str, Path]] = []
@@ -380,6 +480,17 @@ def load_model(path: Path, device: torch.device, strict_param_budget: int) -> Lo
         loaded_tensors=loaded,
         skipped_tensors=skipped,
     )
+
+
+def load_policy_artifact(
+    path: Path,
+    device: torch.device,
+    strict_param_budget: int,
+) -> LoadedModel | LoadedFourModel:
+    if path.suffix.lower() == ".json":
+        bundle = load_four_model_bundle(path, device=str(device))
+        return LoadedFourModel(path=path, bundle=bundle)
+    return load_model(path, device, strict_param_budget=strict_param_budget)
 
 
 def choose_action_pos(model: Any, seat_obs: dict[str, Any], device: torch.device) -> tuple[int, float, float]:
@@ -497,7 +608,11 @@ def run_case(
                 conf = 1.0
                 pred_pts = 0.0
             elif policy.mode == "model" and policy.model is not None:
-                pos, conf, pred_pts = choose_action_pos(policy.model.model, seat_obs, device)
+                if isinstance(policy.model, LoadedFourModel):
+                    pos, conf = choose_action_pos_with_bundle(policy.model.bundle, seat_obs)
+                    pred_pts = 0.0
+                else:
+                    pos, conf, pred_pts = choose_action_pos(policy.model.model, seat_obs, device)
                 pos = max(0, min(pos, len(legal) - 1))
             else:
                 # Deterministic fallback when no policy is configured.
@@ -734,7 +849,7 @@ def main() -> None:
     device = choose_device(args.device)
     print(f"[INFO] device={device}")
 
-    model_cache: dict[str, LoadedModel] = {}
+    model_cache: dict[str, LoadedModel | LoadedFourModel] = {}
     seat_policies: list[SeatPolicy] = []
     for seat, spec in enumerate(specs):
         spec_str = "" if spec is None else str(spec).strip().lower()
@@ -750,12 +865,15 @@ def main() -> None:
             continue
         key = str(path.resolve())
         if key not in model_cache:
-            model_cache[key] = load_model(path, device, strict_param_budget=args.strict_param_budget)
+            model_cache[key] = load_policy_artifact(path, device, strict_param_budget=args.strict_param_budget)
         m = model_cache[key]
         seat_policies.append(SeatPolicy(mode="model", model=m))
-        print(
-            f"[INFO] P{seat}: {path} | family={m.family} | loaded={m.loaded_tensors} skipped={m.skipped_tensors}"
-        )
+        if isinstance(m, LoadedFourModel):
+            print(f"[INFO] P{seat}: {path} | four-model manifest")
+        else:
+            print(
+                f"[INFO] P{seat}: {path} | family={m.family} | loaded={m.loaded_tensors} skipped={m.skipped_tensors}"
+            )
 
     suite_path = Path(args.suite)
     if not suite_path.exists():
@@ -769,50 +887,14 @@ def main() -> None:
         ML / "eval" / "logs" / f"fixed_eval_{time.strftime('%Y%m%d_%H%M%S')}.log"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    sink = LogSink(echo=args.echo)
-
-    outcomes: list[dict[str, Any]] = []
-    for case in cases:
-        info = run_case(case, seat_policies, device=device, log=sink, ansi=args.ansi)
-        outcomes.append(info)
-
-    summary = summarize_outcomes(outcomes)
-    sink.write("")
-    sink.write("=== SUMMARY ===")
-    sink.write(
-        f"games={summary.get('games', 0)} | "
-        f"made={summary.get('contract_made_rate', 0.0):.1%} | "
-        f"taken_won={summary.get('taken_games_won', 0)}/{summary.get('taken_games', 0)} "
-        f"({summary.get('taken_game_win_rate', 0.0):.1%}) | "
-        f"pass={summary.get('pass_game_rate', 0.0):.1%} | "
-        f"avg_bid={summary.get('avg_highest_bid', 0.0):.1f}"
+    summary = evaluate_cases(
+        cases,
+        seat_policies,
+        device=device,
+        echo=args.echo,
+        ansi=args.ansi,
+        output_path=out_path,
     )
-    sink.write(
-        f"tricks(play:def)={summary.get('avg_playing_tricks', 0.0):.2f}:{summary.get('avg_defending_tricks', 0.0):.2f} | "
-        f"trump_calls={summary.get('pair_called', 0)}/{summary.get('pair_possible', 0)} "
-        f"({summary.get('pair_call_rate', 0.0):.1%}) | "
-        f"avg_margin={summary.get('avg_playing_margin_points', 0.0):+.1f}"
-    )
-    sink.write(
-        f"overbid(est=140+20*pairs): games={summary.get('overbid_games', 0)} "
-        f"({summary.get('overbid_rate', 0.0):.1%}) | "
-        f"avg_over={summary.get('avg_overbid_amount', 0.0):.1f} | "
-        f"avg_bid={summary.get('avg_overbid_bid', 0.0):.1f} | "
-        f"avg_potential={summary.get('avg_overbid_potential', 0.0):.1f}"
-    )
-    sink.write(
-        f"questions->trump: {summary.get('questions_to_trump', 0)}/{summary.get('questions_total', 0)} "
-        f"({summary.get('questions_to_trump_rate', 0.0):.1%}) | "
-        f"questions_no_trump: {summary.get('questions_no_trump', 0)} "
-        f"({summary.get('questions_no_trump_rate', 0.0):.1%})"
-    )
-    sink.write(
-        f"bid>pred_pts: {summary.get('bid_over_pred_count', 0)}/{summary.get('bid_pred_count', 0)} "
-        f"({summary.get('bid_over_pred_rate', 0.0):.1%}) | "
-        f"avg_over={summary.get('avg_bid_over_pred_amount', 0.0):.1f}"
-    )
-
-    out_path.write_text("\n".join(sink.lines) + "\n", encoding="utf-8")
     print(f"[SUCCESS] wrote log: {out_path}")
 
 
