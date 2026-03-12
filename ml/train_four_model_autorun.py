@@ -434,6 +434,7 @@ def run_autorun(
             bidding_games=mix.bidding_games,
             passing_games=mix.passing_games,
             seed_start=selfplay_seed_start + (attempt - 1) * selfplay_games_per_cycle,
+            device=device,
         )
         coverage_ok, coverage_metrics = _validate_selfplay_coverage(sim_data, thresholds)
         if not coverage_ok:

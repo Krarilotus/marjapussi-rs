@@ -14,6 +14,7 @@ try:
         task_from_phase_name,
     )
     from ml.four_model_runtime import FourModelBundle, choose_action_pos_with_bundle, load_four_model_bundle
+    from ml.train.reward import evaluated_team_points
 except ModuleNotFoundError:
     from env import MarjapussiEnv
     from four_model_phase import (
@@ -22,6 +23,7 @@ except ModuleNotFoundError:
         task_from_phase_name,
     )
     from four_model_runtime import FourModelBundle, choose_action_pos_with_bundle, load_four_model_bundle
+    from train.reward import evaluated_team_points
 
 
 @dataclass(frozen=True)
@@ -77,12 +79,27 @@ def _finalize_record(record: dict[str, Any], outcome: dict[str, Any]) -> dict[st
     rel_pov = int(record["obs"].get("my_role", 0))
     team_idx = 0 if rel_pov % 2 == 0 else 1
     opp_idx = 1 - team_idx
+    won = outcome.get("won")
+    if won is None and "contract_made" in outcome:
+        won = outcome.get("contract_made")
+    game_value = outcome.get("game_value")
+    if game_value is None and "highest_bid" in outcome:
+        game_value = outcome.get("highest_bid")
+    evaluated_outcome = dict(outcome)
+    evaluated_outcome["won"] = won
+    evaluated_outcome["game_value"] = game_value if game_value is not None else 0
+    eval_points = evaluated_team_points(evaluated_outcome)
     record["outcome_pts_my_team"] = float(team_points[team_idx])
     record["outcome_pts_opp"] = float(team_points[opp_idx])
+    record["outcome_eval_pts_my_team"] = float(eval_points[team_idx])
+    record["outcome_eval_pts_opp"] = float(eval_points[opp_idx])
     record["no_one_played"] = bool(outcome.get("no_one_played", False))
     record["contract_made"] = outcome.get("contract_made")
     record["highest_bid"] = outcome.get("highest_bid")
     record["playing_party"] = outcome.get("playing_party")
+    record["won"] = won
+    record["game_value"] = game_value
+    record["schwarz"] = bool(outcome.get("schwarz", False))
     record["playing_party_tricks"] = outcome.get("playing_party_tricks")
     record["defending_party_tricks"] = outcome.get("defending_party_tricks")
     record["playing_called_trumps"] = outcome.get("playing_called_trumps")
@@ -166,8 +183,9 @@ def generate_selfplay_dataset(
     seed_start: int = 1,
     max_steps: int = 300,
     max_seed_tries_per_target: int = 32,
+    device: str | None = None,
 ) -> SelfPlaySummary:
-    bundle = load_four_model_bundle(manifest_path, device="cpu")
+    bundle = load_four_model_bundle(manifest_path, device=device)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     total_records = 0
@@ -250,6 +268,7 @@ def main() -> None:
     ap.add_argument("--seed-start", type=int, default=1)
     ap.add_argument("--max-steps", type=int, default=300)
     ap.add_argument("--max-seed-tries-per-target", type=int, default=32)
+    ap.add_argument("--device", default=("cuda" if torch.cuda.is_available() else "cpu"))
     args = ap.parse_args()
     cli_full_games = args.full_games
     cli_bidding_games = args.bidding_games
@@ -269,6 +288,7 @@ def main() -> None:
         seed_start=args.seed_start,
         max_steps=args.max_steps,
         max_seed_tries_per_target=args.max_seed_tries_per_target,
+        device=args.device,
     )
     print(
         json.dumps(

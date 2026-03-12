@@ -40,6 +40,15 @@ class FourModelBundle:
     device: str
 
 
+def resolve_runtime_device(device: str | None = None) -> str:
+    requested = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if requested.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA runtime requested for four-model bundle, but torch.cuda.is_available() is False")
+        return "cuda"
+    return "cpu"
+
+
 def normalize_runtime_record(payload: dict) -> dict:
     if "obs" in payload and "canonical_state" in payload:
         return payload
@@ -69,7 +78,7 @@ def load_decision_checkpoint(task: str, path: str | Path, device: str = "cpu") -
 
 def load_four_model_bundle(manifest_path: str | Path, device: str | None = None) -> FourModelBundle:
     manifest = load_four_model_manifest(manifest_path)
-    resolved_device = device or manifest.device
+    resolved_device = resolve_runtime_device(device or manifest.device)
     decision_models = {
         "bidding": load_decision_checkpoint("bidding", manifest.outputs.bidding, resolved_device),
         "passing": load_decision_checkpoint("passing", manifest.outputs.passing, resolved_device),

@@ -53,11 +53,27 @@ class FakeEnv:
                 "my_role": 0,
             },
             True,
-            {"team_points": [120, 60], "no_one_played": False, "contract_made": True},
+            {
+                "team_points": [120, 60],
+                "no_one_played": False,
+                "contract_made": True,
+                "playing_party": 0,
+                "won": True,
+                "game_value": 140,
+                "schwarz": False,
+            },
         )
 
     def run_to_end(self, policy):
-        return {"team_points": [120, 60], "no_one_played": False, "contract_made": True}
+        return {
+            "team_points": [120, 60],
+            "no_one_played": False,
+            "contract_made": True,
+            "playing_party": 0,
+            "won": True,
+            "game_value": 140,
+            "schwarz": False,
+        }
 
     def close(self):
         return None
@@ -65,16 +81,25 @@ class FakeEnv:
 
 def test_generate_selfplay_dataset_writes_records(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(mod, "MarjapussiEnv", FakeEnv)
-    monkeypatch.setattr(mod, "load_four_model_bundle", lambda manifest_path, device="cpu": object())
+    seen: dict[str, str | None] = {"device": None}
+
+    def _load_bundle(manifest_path, device="cpu"):
+        seen["device"] = device
+        return object()
+
+    monkeypatch.setattr(mod, "load_four_model_bundle", _load_bundle)
     monkeypatch.setattr(mod, "choose_action_pos_with_bundle", lambda bundle, payload: (0, 1.0))
 
     out = tmp_path / "selfplay.ndjson"
-    summary = mod.generate_selfplay_dataset("manifest.json", out, games=2)
+    summary = mod.generate_selfplay_dataset("manifest.json", out, games=2, device="cuda")
     lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert summary.games == 2
     assert summary.records == 2
     assert len(lines) == 2
+    assert seen["device"] == "cuda"
     assert lines[0]["outcome_pts_my_team"] == 120.0
+    assert lines[0]["outcome_eval_pts_my_team"] == 140.0
+    assert lines[0]["outcome_eval_pts_opp"] == 60.0
 
 
 def test_default_selfplay_mix_reserves_phase_topups():

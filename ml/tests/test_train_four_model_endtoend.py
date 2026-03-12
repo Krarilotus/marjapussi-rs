@@ -18,6 +18,7 @@ def test_end_to_end_trainer_regenerates_data_each_cycle(tmp_path: Path, monkeypa
         seed_start,
         max_steps=300,
         max_seed_tries_per_target=32,
+        device=None,
     ):
         Path(output_path).write_text("{}", encoding="utf-8")
         return mod.SelfPlaySummary(

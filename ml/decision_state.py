@@ -141,12 +141,22 @@ def _quality_weight_from_record(record: dict) -> float:
     return weight
 
 
+def _record_point_diff(record: dict, *, evaluated: bool) -> float:
+    if evaluated:
+        my_eval = record.get("outcome_eval_pts_my_team")
+        opp_eval = record.get("outcome_eval_pts_opp")
+        if my_eval is not None and opp_eval is not None:
+            return float(my_eval) - float(opp_eval)
+    my_points = float(record.get("outcome_pts_my_team", 0.0))
+    opp_points = float(record.get("outcome_pts_opp", 0.0))
+    return my_points - opp_points
+
+
 def build_decision_targets_from_record(record: dict) -> DecisionTargets:
     state = CanonicalState.from_record(record)
     task = task_from_phase_name(state.global_state.phase)
-    my_points = float(record.get("outcome_pts_my_team", 0.0))
-    opp_points = float(record.get("outcome_pts_opp", 0.0))
-    point_diff = my_points - opp_points
+    point_diff = _record_point_diff(record, evaluated=False)
+    contract_point_diff = _record_point_diff(record, evaluated=True)
     win_signal = 1.0 if point_diff > 0.0 else 0.0
     standing_norm = len(state.strategy.standing_card_indices) / 36.0
     secured_floor_norm = _normalize_points(state.teams[0].secured_point_floor)
@@ -168,7 +178,7 @@ def build_decision_targets_from_record(record: dict) -> DecisionTargets:
             (
             standing_norm,
             secured_floor_norm,
-            _normalize_points(point_diff),
+            _normalize_points(contract_point_diff),
             ),
             dtype=torch.float32,
         )
@@ -177,7 +187,7 @@ def build_decision_targets_from_record(record: dict) -> DecisionTargets:
     return DecisionTargets(
         task=task,
         policy_idx=int(record.get("action_taken", 0)),
-        value_target=_normalize_points(point_diff),
+        value_target=_normalize_points(contract_point_diff),
         aux_targets=aux_targets,
         sample_weight=_quality_weight_from_record(record),
         teacher_policy=teacher_policy,

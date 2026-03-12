@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import torch
+import pytest
 
 from ml.belief_model import BeliefNet
 from ml.decision_model import BiddingNet, PassingNet, PlayingNet
@@ -12,6 +13,7 @@ from ml.four_model_runtime import (
     normalize_runtime_record,
     predict_belief_owner_onehot,
     predict_with_bundle,
+    resolve_runtime_device,
 )
 from ml.neurosymbolic_state import CanonicalState
 from ml.tests.test_belief_decoder import decoder_payload
@@ -114,3 +116,13 @@ def test_load_four_model_bundle_and_predict(tmp_path: Path):
     pos, conf = choose_action_pos_with_bundle(bundle, record["obs"] | {"canonical_state": record["canonical_state"]})
     assert pos in (0, 1)
     assert 0.0 <= conf <= 1.0
+
+
+def test_resolve_runtime_device_accepts_cpu():
+    assert resolve_runtime_device("cpu") == "cpu"
+
+
+def test_resolve_runtime_device_raises_when_cuda_requested_without_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError):
+        resolve_runtime_device("cuda")

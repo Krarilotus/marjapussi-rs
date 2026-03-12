@@ -122,6 +122,20 @@ def test_build_passing_targets_uses_teacher_policy_and_aux_targets():
     assert int(targets.teacher_policy.argmax().item()) == 0
 
 
+def test_build_decision_targets_prefers_contract_evaluated_points_when_present():
+    record = sample_record()
+    record["canonical_state"]["global"]["phase"] = "Playing"
+    record["obs"]["phase"] = "Playing"
+    record["outcome_pts_my_team"] = 158
+    record["outcome_pts_opp"] = 62
+    record["outcome_eval_pts_my_team"] = -140
+    record["outcome_eval_pts_opp"] = 62
+    targets = build_decision_targets_from_record(record)
+    assert targets.task == "playing"
+    assert targets.value_target < 0.0
+    assert float(targets.aux_targets[-1].item()) < 0.0
+
+
 def test_task_from_phase_name_normalizes_parameterized_answer_phases():
     assert task_from_phase_name("AnsweringHalf(Acorns)") == "playing"
     assert task_from_phase_name("AnsweringPair") == "playing"

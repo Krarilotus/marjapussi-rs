@@ -63,6 +63,7 @@ def run_end_to_end_training(
             bidding_games=mix.bidding_games,
             passing_games=mix.passing_games,
             seed_start=seed_start + cycle_idx * games_per_cycle,
+            device=device,
         )
         current_manifest = run_joint_training(
             base_manifest_path=current_manifest,
