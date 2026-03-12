@@ -132,6 +132,8 @@ Decision-model foundation now exists separately:
   - writes `phase_reports/*.json`
   - fails hard if a human phase or the joint phase does not pass semantic gates
   - validates self-play task coverage before each joint update
+  - resumes from validated checkpoints and the latest in-progress phase checkpoint
+  - prints run-level ETA estimates based on completed phase durations and remaining planned work
 - manifest-aware evaluation / UI:
   - `just eval-fixed checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json`
   - `just eval-fixed-four-model manifest=...`
@@ -177,6 +179,7 @@ Behavior:
 - `just inspect target=stderr` tails `autorun.stderr.log`.
 - `just inspect target=progress` prints `autorun_progress.json`.
 - `just resume run_name=<name>` works for managed runs with `run_config.json` and for older four-model runs by inferring configuration from `human_pretrain_manifest.json` or `joint_manifest.json`.
+- human pretraining now caches compiled tensor samples under `ml/data/cache/` to avoid reparsing NDJSON and rebuilding teacher targets every epoch.
 - default start profile is intentionally Windows-safe:
   - `device=cuda`
   - `workers=0`

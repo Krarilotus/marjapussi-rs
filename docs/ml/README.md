@@ -85,6 +85,8 @@ Operational tooling:
    - promotes validated phase checkpoints
    - writes `phase_reports/*.json`
    - retries failed phases and rejects self-play cycles with missing task coverage
+   - resumes from validated checkpoints and latest in-progress phase checkpoints
+   - emits run-level ETA estimates from observed phase durations
 17. Live structured-state transport and manifest-aware runtime:
    - `src/ml/proto.rs`
    - `ml/env.py`
@@ -107,6 +109,10 @@ Operational tooling:
    - `just stop`
    - `just resume`
    - `resume` supports both managed runs and older four-model runs by inferring config from manifests
+21. Human pretraining tensor cache:
+   - `ml/pretrain_cache.py`
+   - caches compiled decision/belief samples under `ml/data/cache/`
+   - removes repeated NDJSON parsing and teacher-target recomputation across epochs
 
 Order of implementation should follow:
 

@@ -1,26 +1,24 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import random
 import sys
 import time
 from pathlib import Path
+from math import ceil
 
 import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from decision_model import BiddingNet, DecisionModelConfig, PassingNet, PlayingNet
 from checkpoint_utils import load_model_checkpoint
+from pretrain_cache import load_or_build_decision_cache
 from decision_state import (
     TASK_AUX_TARGET_NAMES,
-    build_decision_features_from_record,
-    build_decision_targets_from_record,
 )
 from train.utils import Log
 
@@ -44,56 +42,24 @@ def configure_torch_runtime(device: str, workers: int) -> None:
         torch.set_num_threads(max(1, min(8, cpu_count // max(1, workers))))
 
 
-class DecisionNdjsonDataset(IterableDataset):
-    def __init__(
-        self,
-        path: str,
-        task: str,
-        shuffle_buf: int = 50_000,
-        epochs: int = 1,
-    ) -> None:
-        self.path = path
-        self.task = task
-        self.shuffle_buf = shuffle_buf
-        self.epochs = epochs
-        self.worker_id = 0
-        self.num_workers = 1
+class DecisionCachedDataset(Dataset):
+    def __init__(self, samples: list[dict]) -> None:
+        self.samples = samples
 
-    def __iter__(self):
-        for _ in range(self.epochs):
-            buf = []
-            with open(self.path, "r", encoding="utf-8") as handle:
-                for line_no, line in enumerate(handle):
-                    if line_no % self.num_workers != self.worker_id:
-                        continue
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    try:
-                        features = build_decision_features_from_record(record, use_teacher_belief=True)
-                    except Exception:
-                        continue
-                    if features.task != self.task:
-                        continue
-                    buf.append(record)
-                    if len(buf) >= self.shuffle_buf:
-                        random.shuffle(buf)
-                        yield from buf
-                        buf.clear()
-            if buf:
-                random.shuffle(buf)
-                yield from buf
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict:
+        return self.samples[index]
 
 
-def worker_init(worker_id: int) -> None:
-    info = torch.utils.data.get_worker_info()
-    ds = info.dataset
-    ds.worker_id = worker_id
-    ds.num_workers = info.num_workers
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
@@ -108,23 +74,17 @@ def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
     sample_weights = []
     teacher_policies = []
 
-    for record in records:
-        try:
-            features = build_decision_features_from_record(record, use_teacher_belief=True)
-            targets = build_decision_targets_from_record(record)
-        except Exception:
-            continue
-
-        card_feats.append(features.card_features)
-        player_feats.append(features.player_features)
-        global_feats.append(features.global_features)
-        action_feats.append(features.action_features)
-        action_masks.append(features.action_mask)
-        policy_targets.append(int(targets.policy_idx))
-        value_targets.append(float(targets.value_target))
-        aux_targets.append(targets.aux_targets)
-        sample_weights.append(float(targets.sample_weight))
-        teacher_policies.append(targets.teacher_policy)
+    for sample in records:
+        card_feats.append(sample["card_features"])
+        player_feats.append(sample["player_features"])
+        global_feats.append(sample["global_features"])
+        action_feats.append(sample["action_features"])
+        action_masks.append(sample["action_mask"])
+        policy_targets.append(int(sample["policy_target"]))
+        value_targets.append(float(sample["value_target"]))
+        aux_targets.append(sample["aux_targets"])
+        sample_weights.append(float(sample["sample_weight"]))
+        teacher_policies.append(sample["teacher_policy"])
 
     if not card_feats:
         return None
@@ -208,31 +168,29 @@ def train(
     scaler = GradScaler("cuda", enabled=(device.startswith("cuda") and not no_amp))
 
     try:
-        with open(data_path, "r", encoding="utf-8") as handle:
-            n_lines = sum(1 for _ in handle)
-        steps_per_epoch = max(1, n_lines // max(1, batch))
-    except Exception:
-        steps_per_epoch = 100
+        cache_path, cached_samples = load_or_build_decision_cache(data_path, task)
+        Log.info(f"Cached dataset: {cache_path}")
+        Log.info(f"Samples: {len(cached_samples):,}")
+    except Exception as exc:
+        raise RuntimeError(f"failed to build decision cache for {task}: {exc}") from exc
+
+    steps_per_epoch = max(1, ceil(len(cached_samples) / max(1, batch)))
 
     best_acc = -1.0
     streak = 0
     last_summary: dict[str, float] = {}
+    overall_t0 = time.time()
 
     for epoch_idx in range(epochs):
         epochs_seen = start_epoch + epoch_idx + 1
         Log.phase(f"{task.capitalize()} Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs})")
-        ds = DecisionNdjsonDataset(
-            data_path,
-            task=task,
-            shuffle_buf=min(100_000, batch * 128),
-            epochs=1,
-        )
+        ds = DecisionCachedDataset(cached_samples)
         loader = DataLoader(
             ds,
             batch_size=batch,
             collate_fn=collate_decision,
+            shuffle=True,
             num_workers=workers,
-            worker_init_fn=worker_init,
             pin_memory=(device != "cpu"),
             prefetch_factor=2 if workers > 0 else None,
             persistent_workers=(workers > 0),
@@ -308,12 +266,18 @@ def train(
             if step % max(1, min(log_every, max(1, steps_per_epoch // 8))) == 0:
                 elapsed = time.time() - t0
                 samples_per_sec = (step * batch) / max(elapsed, 1e-6)
+                remaining_steps = max(0, steps_per_epoch - step)
+                remaining_epochs = max(0, epochs - epoch_idx - 1)
+                eta_seconds = (remaining_steps + remaining_epochs * steps_per_epoch) * (
+                    elapsed / max(1, step)
+                )
                 Log.opt(
                     f"Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs}) | Step {step}/{steps_per_epoch} | "
                     f"Loss: {sum_loss / step:.4f} | Pol: {sum_policy / step:.4f} | "
                     f"Val: {sum_value / step:.4f} | Aux: {sum_aux / step:.4f} | "
                     f"Teach: {sum_teacher / step:.4f} | "
-                    f"Acc: {(correct / max(1, total)):.3f} | {samples_per_sec:,.0f} samples/s",
+                    f"Acc: {(correct / max(1, total)):.3f} | {samples_per_sec:,.0f} samples/s | "
+                    f"ETA: {_format_duration(eta_seconds)}",
                     end="",
                 )
 
@@ -350,6 +314,10 @@ def train(
         Log.success(f"{task.capitalize()} Epoch {epochs_seen} Summary:")
         print(f"  - Steps:     {step}")
         print(f"  - Accuracy:  {accuracy:.4f}")
+        epoch_elapsed = time.time() - t0
+        total_elapsed = time.time() - overall_t0
+        remaining_epochs = max(0, epochs - epoch_idx - 1)
+        print(f"  - Time:      Epoch: {_format_duration(epoch_elapsed)} | RunETA: {_format_duration(remaining_epochs * epoch_elapsed)} | Elapsed: {_format_duration(total_elapsed)}")
         print(
             f"  - Losses:    Total: {sum_loss / max(1, step):.4f} | "
             f"Pol: {sum_policy / max(1, step):.4f} | "

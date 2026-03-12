@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import random
 import sys
 import time
 from pathlib import Path
+from math import ceil
 
 import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from belief_model import BeliefModelConfig, BeliefNet
 from checkpoint_utils import load_model_checkpoint
-from neurosymbolic_dataset import build_belief_features, build_belief_targets, load_canonical_state
+from pretrain_cache import load_or_build_belief_cache
 from train.utils import Log
 
 
@@ -40,42 +39,24 @@ def configure_torch_runtime(device: str, workers: int) -> None:
         torch.set_num_threads(max(1, min(8, cpu_count // max(1, workers))))
 
 
-class BeliefNdjsonDataset(IterableDataset):
-    def __init__(self, path: str, shuffle_buf: int = 50_000, epochs: int = 1) -> None:
-        self.path = path
-        self.shuffle_buf = shuffle_buf
-        self.epochs = epochs
-        self.worker_id = 0
-        self.num_workers = 1
+class BeliefCachedDataset(Dataset):
+    def __init__(self, samples: list[dict]) -> None:
+        self.samples = samples
 
-    def __iter__(self):
-        for _ in range(self.epochs):
-            buf = []
-            with open(self.path, "r", encoding="utf-8") as handle:
-                for line_no, line in enumerate(handle):
-                    if line_no % self.num_workers != self.worker_id:
-                        continue
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        buf.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-                    if len(buf) >= self.shuffle_buf:
-                        random.shuffle(buf)
-                        yield from buf
-                        buf.clear()
-            if buf:
-                random.shuffle(buf)
-                yield from buf
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict:
+        return self.samples[index]
 
 
-def worker_init(worker_id: int) -> None:
-    info = torch.utils.data.get_worker_info()
-    ds = info.dataset
-    ds.worker_id = worker_id
-    ds.num_workers = info.num_workers
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def collate_belief(records: list[dict]) -> dict[str, torch.Tensor] | None:
@@ -89,23 +70,16 @@ def collate_belief(records: list[dict]) -> dict[str, torch.Tensor] | None:
     half_targets = []
     pair_targets = []
 
-    for record in records:
-        try:
-            state = load_canonical_state(record)
-            feats = build_belief_features(state)
-            targets = build_belief_targets(state)
-        except Exception:
-            continue
-
-        card_feats.append(feats.card_features)
-        player_feats.append(feats.player_features[1:])  # only hidden players
-        global_feats.append(feats.global_features)
-        card_targets.append(torch.tensor(targets.card_owner_targets, dtype=torch.long))
-        hidden_masks.append(torch.tensor(targets.hidden_card_mask, dtype=torch.bool))
-        candidate_masks.append(torch.tensor(targets.owner_candidate_mask, dtype=torch.bool))
-        void_targets.append(torch.tensor(targets.player_void_targets[1:], dtype=torch.float32))
-        half_targets.append(torch.tensor(targets.player_has_half_targets[1:], dtype=torch.float32))
-        pair_targets.append(torch.tensor(targets.player_has_pair_targets[1:], dtype=torch.float32))
+    for sample in records:
+        card_feats.append(sample["card_features"])
+        player_feats.append(sample["player_features"])
+        global_feats.append(sample["global_features"])
+        card_targets.append(sample["card_targets"])
+        hidden_masks.append(sample["hidden_mask"])
+        candidate_masks.append(sample["candidate_mask"])
+        void_targets.append(sample["void_targets"])
+        half_targets.append(sample["half_targets"])
+        pair_targets.append(sample["pair_targets"])
 
     if not card_feats:
         return None
@@ -160,11 +134,13 @@ def train(
     scaler = GradScaler("cuda", enabled=(device.startswith("cuda") and not no_amp))
 
     try:
-        with open(data_path, "r", encoding="utf-8") as handle:
-            n_lines = sum(1 for _ in handle)
-        steps_per_epoch = max(1, n_lines // max(1, batch))
-    except Exception:
-        steps_per_epoch = 100
+        cache_path, cached_samples = load_or_build_belief_cache(data_path)
+        Log.info(f"Cached dataset: {cache_path}")
+        Log.info(f"Samples: {len(cached_samples):,}")
+    except Exception as exc:
+        raise RuntimeError(f"failed to build belief cache: {exc}") from exc
+
+    steps_per_epoch = max(1, ceil(len(cached_samples) / max(1, batch)))
 
     global_step = 0
     if checkpoint is not None:
@@ -173,18 +149,19 @@ def train(
     streak = 0
     min_epochs = max(1, int(min_epochs))
     target_hidden_streak = max(1, int(target_hidden_streak))
+    overall_t0 = time.time()
 
     last_metrics: dict[str, float] = {}
     for epoch_idx in range(epochs):
         epochs_seen = start_epoch + epoch_idx + 1
         Log.phase(f"Belief Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs})")
-        ds = BeliefNdjsonDataset(data_path, shuffle_buf=min(100_000, batch * 128), epochs=1)
+        ds = BeliefCachedDataset(cached_samples)
         loader = DataLoader(
             ds,
             batch_size=batch,
             collate_fn=collate_belief,
+            shuffle=True,
             num_workers=workers,
-            worker_init_fn=worker_init,
             pin_memory=(device != "cpu"),
             prefetch_factor=2 if workers > 0 else None,
             persistent_workers=(workers > 0),
@@ -290,11 +267,17 @@ def train(
             if step % max(1, min(log_every, max(1, steps_per_epoch // 8))) == 0:
                 elapsed = time.time() - t0
                 samples_per_sec = (step * batch) / max(elapsed, 1e-6)
+                remaining_steps = max(0, steps_per_epoch - step)
+                remaining_epochs = max(0, epochs - epoch_idx - 1)
+                eta_seconds = (remaining_steps + remaining_epochs * steps_per_epoch) * (
+                    elapsed / max(1, step)
+                )
                 Log.opt(
                     f"Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs}) | Step {step}/{steps_per_epoch} | "
                     f"Loss: {sum_loss / step:.4f} | Card: {sum_card / step:.4f} | "
                     f"Aux: {sum_aux / step:.4f} | HiddenAcc: "
-                    f"{(correct_hidden / max(1, total_hidden)):.3f} | {samples_per_sec:,.0f} samples/s",
+                    f"{(correct_hidden / max(1, total_hidden)):.3f} | {samples_per_sec:,.0f} samples/s | "
+                    f"ETA: {_format_duration(eta_seconds)}",
                     end="",
                 )
 
@@ -337,6 +320,10 @@ def train(
         Log.success(f"Belief Epoch {epochs_seen} Summary:")
         print(f"  - Steps:     {step}")
         print(f"  - HiddenAcc: {hidden_acc:.4f}")
+        epoch_elapsed = time.time() - t0
+        total_elapsed = time.time() - overall_t0
+        remaining_epochs = max(0, epochs - epoch_idx - 1)
+        print(f"  - Time:      Epoch: {_format_duration(epoch_elapsed)} | RunETA: {_format_duration(remaining_epochs * epoch_elapsed)} | Elapsed: {_format_duration(total_elapsed)}")
         print(
             f"  - BeliefQ:   VoidAcc: {void_acc:.4f} | HalfAcc: {half_acc:.4f} | "
             f"PairAcc: {pair_acc:.4f} | Calib: {calibration_score:.4f}"

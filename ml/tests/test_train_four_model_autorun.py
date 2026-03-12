@@ -245,3 +245,46 @@ def test_run_autorun_resumes_from_existing_human_manifest(tmp_path: Path, monkey
         thresholds=mod.TaskThresholds(),
     )
     assert out_manifest.exists()
+
+
+def test_train_decision_phase_resumes_latest_attempt_checkpoint(tmp_path: Path, monkeypatch):
+    phase_dir = tmp_path / "human" / "playing" / "attempt_01"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    resume_ckpt = phase_dir / "playing_latest.pt"
+    torch.save({"state_dict": {}, "metadata": {"epochs_seen": 2, "accuracy": 0.6, "policy_loss": 0.2}}, resume_ckpt)
+
+    seen = {}
+
+    def fake_decision(**kwargs):
+        seen["checkpoint"] = kwargs.get("checkpoint")
+        ckpt_dir = Path(kwargs["checkpoints_dir"])
+        payload = {
+            "state_dict": {},
+            "metadata": {
+                "task": kwargs["task"],
+                "accuracy": 0.7,
+                "policy_loss": 0.1,
+            },
+        }
+        torch.save(payload, ckpt_dir / "playing_latest.pt")
+        torch.save(payload, ckpt_dir / "playing_best.pt")
+        return {"accuracy": 0.7, "policy_loss": 0.1}
+
+    monkeypatch.setattr(mod, "train_decision", fake_decision)
+    stage = next(stage for stage in mod.default_decision_stages() if stage.task == "playing")
+    ckpt, attempts = mod._train_decision_phase(
+        data_path="ml/data/human_dataset_canonical_smoke.ndjson",
+        root=tmp_path / "human",
+        stage=stage,
+        device="cpu",
+        workers=0,
+        max_steps=1,
+        no_amp=True,
+        min_epochs=1,
+        target_acc_streak=2,
+        thresholds=mod.TaskThresholds(),
+        max_retries=3,
+    )
+    assert ckpt.exists()
+    assert seen["checkpoint"] == resume_ckpt
+    assert attempts[0].attempt == 1

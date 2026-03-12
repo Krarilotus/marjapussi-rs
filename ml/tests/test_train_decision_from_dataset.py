@@ -3,6 +3,8 @@ from pathlib import Path
 
 import torch
 
+from ml.decision_state import build_decision_features_from_record, build_decision_targets_from_record
+from ml.pretrain_cache import load_or_build_decision_cache
 from ml.tests.test_decision_state import sample_passing_record, sample_record
 from ml.train_decision_from_dataset import collate_decision, train
 
@@ -16,7 +18,26 @@ def make_record(phase: str, action_token: int) -> dict:
 
 
 def test_collate_decision_builds_batch_tensors():
-    batch = collate_decision([make_record("Bidding", 41), make_record("Bidding", 41)])
+    records = [make_record("Bidding", 41), make_record("Bidding", 41)]
+    samples = []
+    for record in records:
+        features = build_decision_features_from_record(record, use_teacher_belief=True)
+        targets = build_decision_targets_from_record(record)
+        samples.append(
+            {
+                "card_features": features.card_features,
+                "player_features": features.player_features,
+                "global_features": features.global_features,
+                "action_features": features.action_features,
+                "action_mask": features.action_mask,
+                "policy_target": int(targets.policy_idx),
+                "value_target": float(targets.value_target),
+                "aux_targets": targets.aux_targets,
+                "sample_weight": float(targets.sample_weight),
+                "teacher_policy": targets.teacher_policy,
+            }
+        )
+    batch = collate_decision(samples)
     assert batch is not None
     assert tuple(batch["card_features"].shape) == (2, 36, 32)
     assert tuple(batch["player_features"].shape) == (2, 4, 18)
@@ -31,7 +52,25 @@ def test_collate_decision_pads_variable_action_counts():
     rec_a = make_record("Bidding", 41)
     rec_b = make_record("Bidding", 41)
     rec_b["obs"]["legal_actions"] = rec_b["obs"]["legal_actions"][:1]
-    batch = collate_decision([rec_a, rec_b])
+    samples = []
+    for record in [rec_a, rec_b]:
+        features = build_decision_features_from_record(record, use_teacher_belief=True)
+        targets = build_decision_targets_from_record(record)
+        samples.append(
+            {
+                "card_features": features.card_features,
+                "player_features": features.player_features,
+                "global_features": features.global_features,
+                "action_features": features.action_features,
+                "action_mask": features.action_mask,
+                "policy_target": int(targets.policy_idx),
+                "value_target": float(targets.value_target),
+                "aux_targets": targets.aux_targets,
+                "sample_weight": float(targets.sample_weight),
+                "teacher_policy": targets.teacher_policy,
+            }
+        )
+    batch = collate_decision(samples)
     assert batch is not None
     assert tuple(batch["action_features"].shape) == (2, 2, 87)
     assert tuple(batch["action_mask"].shape) == (2, 2)
@@ -40,7 +79,25 @@ def test_collate_decision_pads_variable_action_counts():
 
 
 def test_collate_decision_builds_passing_teacher_batch():
-    batch = collate_decision([sample_passing_record(), sample_passing_record()])
+    samples = []
+    for record in [sample_passing_record(), sample_passing_record()]:
+        features = build_decision_features_from_record(record, use_teacher_belief=True)
+        targets = build_decision_targets_from_record(record)
+        samples.append(
+            {
+                "card_features": features.card_features,
+                "player_features": features.player_features,
+                "global_features": features.global_features,
+                "action_features": features.action_features,
+                "action_mask": features.action_mask,
+                "policy_target": int(targets.policy_idx),
+                "value_target": float(targets.value_target),
+                "aux_targets": targets.aux_targets,
+                "sample_weight": float(targets.sample_weight),
+                "teacher_policy": targets.teacher_policy,
+            }
+        )
+    batch = collate_decision(samples)
     assert batch is not None
     assert tuple(batch["aux_targets"].shape) == (2, 8)
     assert tuple(batch["teacher_policy"].shape) == (2, 2)
@@ -90,3 +147,18 @@ def test_train_decision_from_dataset_smoke(tmp_path: Path):
     )
     payload = torch.load(latest, map_location="cpu")
     assert payload["metadata"]["epochs_seen"] >= 2
+
+
+def test_decision_cache_builds_and_reuses(tmp_path: Path):
+    data_path = tmp_path / "decision.ndjson"
+    with data_path.open("w", encoding="utf-8") as handle:
+        for _ in range(2):
+            handle.write(json.dumps(make_record("Bidding", 41)) + "\n")
+
+    cache_path, samples = load_or_build_decision_cache(data_path, "bidding")
+    assert cache_path.exists()
+    assert len(samples) == 2
+
+    cache_path_again, samples_again = load_or_build_decision_cache(data_path, "bidding")
+    assert cache_path_again == cache_path
+    assert len(samples_again) == 2

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -72,6 +73,17 @@ def _load_manifest_metrics(manifest_path: str | Path) -> dict:
     return json.loads(Path(manifest_path).read_text(encoding="utf-8")).get("metadata", {})
 
 
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def _write_progress(root: Path, payload: dict) -> None:
     (root / "autorun_progress.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -128,6 +140,19 @@ def _latest_passed_attempt(attempts: list[dict]) -> dict | None:
     if not passed:
         return None
     return max(passed, key=lambda entry: int(entry.get("attempt", 0)))
+
+
+def _latest_attempt_checkpoint(phase_dir: Path, stem: str) -> tuple[int, Path] | None:
+    attempt_dirs = sorted(phase_dir.glob("attempt_*"), reverse=True)
+    for attempt_dir in attempt_dirs:
+        try:
+            attempt_num = int(attempt_dir.name.split("_")[-1])
+        except ValueError:
+            continue
+        latest = attempt_dir / f"{stem}_latest.pt"
+        if latest.exists():
+            return attempt_num, latest
+    return None
 
 
 def _resume_validated_decision_checkpoint(root: Path, task: str, threshold: float) -> tuple[Path | None, list[PhaseAttemptResult]]:
@@ -272,8 +297,12 @@ def _train_decision_phase(
         "playing": thresholds.playing_acc,
     }
     required_acc = threshold_map[stage.task]
-    for attempt in range(1, max_retries + 1):
+    resume_attempt = _latest_attempt_checkpoint(phase_dir, stage.task)
+    start_attempt = resume_attempt[0] if resume_attempt is not None else 1
+    resume_checkpoint = resume_attempt[1] if resume_attempt is not None else None
+    for attempt in range(start_attempt, max_retries + 1):
         attempt_dir = phase_dir / f"attempt_{attempt:02d}"
+        started_at = time.time()
         summary = train_decision(
             data_path=data_path,
             task=stage.task,
@@ -287,7 +316,7 @@ def _train_decision_phase(
             target_acc=stage.target_acc,
             target_acc_streak=target_acc_streak,
             no_amp=no_amp,
-            checkpoint=None,
+            checkpoint=resume_checkpoint if attempt == start_attempt else None,
         )
         acc = float(summary["accuracy"])
         latest_checkpoint = attempt_dir / f"{stage.task}_latest.pt"
@@ -295,6 +324,7 @@ def _train_decision_phase(
         selected_checkpoint = best_checkpoint if best_checkpoint.exists() else latest_checkpoint
         selected_acc = _read_phase_metric(selected_checkpoint, "accuracy") or acc
         policy_loss = _read_phase_metric(selected_checkpoint, "policy_loss")
+        duration_sec = time.time() - started_at
         passed = selected_acc >= required_acc
         attempts.append(
             PhaseAttemptResult(
@@ -303,6 +333,7 @@ def _train_decision_phase(
                 metrics={
                     "accuracy": selected_acc,
                     "policy_loss": policy_loss if policy_loss is not None else float(summary.get("policy_loss", 0.0)),
+                    "duration_sec": duration_sec,
                 },
                 passed=passed,
             )
@@ -323,6 +354,7 @@ def _train_decision_phase(
                 },
             )
             return promoted_checkpoint, attempts
+        resume_checkpoint = None
     _write_phase_report(
         root.parent,
         stage.task,
@@ -353,8 +385,12 @@ def _train_belief_phase(
 ) -> tuple[Path, list[PhaseAttemptResult]]:
     phase_dir = root / "belief"
     attempts: list[PhaseAttemptResult] = []
-    for attempt in range(1, max_retries + 1):
+    resume_attempt = _latest_attempt_checkpoint(phase_dir, "belief")
+    start_attempt = resume_attempt[0] if resume_attempt is not None else 1
+    resume_checkpoint = resume_attempt[1] if resume_attempt is not None else None
+    for attempt in range(start_attempt, max_retries + 1):
         attempt_dir = phase_dir / f"attempt_{attempt:02d}"
+        started_at = time.time()
         summary = train_belief(
             data_path=data_path,
             epochs=stage.epochs,
@@ -367,7 +403,7 @@ def _train_belief_phase(
             target_hidden_acc=stage.target_hidden_acc,
             target_hidden_streak=target_hidden_streak,
             no_amp=no_amp,
-            checkpoint=None,
+            checkpoint=resume_checkpoint if attempt == start_attempt else None,
         )
         latest_checkpoint = attempt_dir / "belief_latest.pt"
         best_checkpoint = attempt_dir / "belief_best.pt"
@@ -377,6 +413,7 @@ def _train_belief_phase(
         void_acc = _read_phase_metric(selected_checkpoint, "belief_metrics", "void_suit_acc") or float(summary.get("void_suit_acc", 0.0))
         half_pair_acc = _read_phase_metric(selected_checkpoint, "belief_metrics", "half_pair_acc") or float(summary.get("half_pair_acc", 0.0))
         calibration = _read_phase_metric(selected_checkpoint, "belief_metrics", "calibration_score") or float(summary.get("calibration_score", 0.0))
+        duration_sec = time.time() - started_at
         passed = (
             hidden_acc >= thresholds.belief_hidden_acc
             and consistency >= thresholds.belief_consistency
@@ -394,6 +431,7 @@ def _train_belief_phase(
                     "void_suit_acc": void_acc,
                     "half_pair_acc": half_pair_acc,
                     "calibration_score": calibration,
+                    "duration_sec": duration_sec,
                 },
                 passed=passed,
             )
@@ -417,6 +455,7 @@ def _train_belief_phase(
                 },
             )
             return promoted_checkpoint, attempts
+        resume_checkpoint = None
     _write_phase_report(
         root.parent,
         "belief",
@@ -447,6 +486,45 @@ def _validate_joint_manifest(manifest_path: str | Path, thresholds: TaskThreshol
     return passed, metrics
 
 
+def _estimate_remaining_seconds(
+    phase_history: list[dict],
+    *,
+    total_decision_phases: int,
+    max_joint_attempts: int,
+) -> float | None:
+    def _durations(phase_names: set[str]) -> list[float]:
+        return [
+            float(entry.get("metrics", {}).get("duration_sec", 0.0))
+            for entry in phase_history
+            if entry.get("phase") in phase_names
+            and float(entry.get("metrics", {}).get("duration_sec", 0.0)) > 0.0
+        ]
+
+    decision_durations = _durations({"bidding", "passing", "playing"})
+    belief_durations = _durations({"belief"})
+    joint_durations = _durations({"joint"})
+
+    completed_decisions = len(
+        {entry.get("phase") for entry in phase_history if entry.get("phase") in {"bidding", "passing", "playing"} and entry.get("passed")}
+    )
+    remaining_decisions = max(0, total_decision_phases - completed_decisions)
+    remaining_belief = 0 if any(entry.get("phase") == "belief" and entry.get("passed") for entry in phase_history) else 1
+    completed_joint_attempts = sum(1 for entry in phase_history if entry.get("phase") == "joint")
+    remaining_joint = max(0, max_joint_attempts - completed_joint_attempts)
+
+    avg_decision = (sum(decision_durations) / len(decision_durations)) if decision_durations else None
+    avg_belief = (sum(belief_durations) / len(belief_durations)) if belief_durations else avg_decision
+    avg_joint = (sum(joint_durations) / len(joint_durations)) if joint_durations else avg_decision
+
+    if avg_decision is None and avg_belief is None and avg_joint is None:
+        return None
+
+    decision_eta = remaining_decisions * (avg_decision or 0.0)
+    belief_eta = remaining_belief * (avg_belief or 0.0)
+    joint_eta = remaining_joint * (avg_joint or avg_belief or avg_decision or 0.0)
+    return decision_eta + belief_eta + joint_eta
+
+
 def run_autorun(
     *,
     data_path: str,
@@ -468,6 +546,7 @@ def run_autorun(
 ) -> Path:
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
+    run_started_at = time.time()
     data_root = root / "data"
     data_root.mkdir(parents=True, exist_ok=True)
 
@@ -515,6 +594,12 @@ def run_autorun(
             outputs[stage.task] = ckpt
             phase_history.extend(asdict(a) for a in attempts)
             _write_progress(root, {"phase_history": phase_history})
+            eta = _estimate_remaining_seconds(
+                phase_history,
+                total_decision_phases=len(decision_stages),
+                max_joint_attempts=max_joint_attempts,
+            )
+            print(f"[INFO] RunETA after {stage.task}: {_format_duration(eta)} | Elapsed: {_format_duration(time.time() - run_started_at)}")
 
         belief_ckpt, belief_attempts = _resume_validated_belief_checkpoint(root, thresholds)
         if belief_ckpt is not None:
@@ -537,6 +622,12 @@ def run_autorun(
             outputs["belief"] = belief_ckpt
             phase_history.extend(asdict(a) for a in belief_attempts)
             _write_progress(root, {"phase_history": phase_history})
+            eta = _estimate_remaining_seconds(
+                phase_history,
+                total_decision_phases=len(decision_stages),
+                max_joint_attempts=max_joint_attempts,
+            )
+            print(f"[INFO] RunETA after belief: {_format_duration(eta)} | Elapsed: {_format_duration(time.time() - run_started_at)}")
 
         current_manifest = write_four_model_manifest(
             root / "human" / "human_pretrain_manifest.json",
@@ -607,7 +698,14 @@ def run_autorun(
                     "current_manifest": str(current_manifest),
                 },
             )
+            eta = _estimate_remaining_seconds(
+                phase_history,
+                total_decision_phases=len(decision_stages),
+                max_joint_attempts=max_joint_attempts,
+            )
+            print(f"[INFO] RunETA after joint coverage retry {attempt}: {_format_duration(eta)} | Elapsed: {_format_duration(time.time() - run_started_at)}")
             continue
+        joint_started_at = time.time()
         current_manifest = run_joint_training(
             base_manifest_path=current_manifest,
             sim_data_path=str(sim_data),
@@ -630,7 +728,7 @@ def run_autorun(
                 PhaseAttemptResult(
                     phase="joint",
                     attempt=attempt,
-                    metrics=metrics,
+                    metrics={**metrics, "duration_sec": time.time() - joint_started_at},
                     passed=passed,
                 )
             )
@@ -642,6 +740,12 @@ def run_autorun(
                 "current_manifest": str(current_manifest),
             },
         )
+        eta = _estimate_remaining_seconds(
+            phase_history,
+            total_decision_phases=len(decision_stages),
+            max_joint_attempts=max_joint_attempts,
+        )
+        print(f"[INFO] RunETA after joint attempt {attempt}: {_format_duration(eta)} | Elapsed: {_format_duration(time.time() - run_started_at)}")
         if passed:
             joint_passed = True
             break
