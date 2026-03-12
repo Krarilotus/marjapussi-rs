@@ -11,6 +11,8 @@ try:
         BeliefStageManifest,
         DecisionStageManifest,
         FourModelOutputs,
+        load_four_model_manifest,
+        validate_four_model_manifest,
         write_four_model_manifest,
     )
     from ml.checkpoint_utils import checkpoint_metadata
@@ -25,6 +27,8 @@ except ModuleNotFoundError:
         BeliefStageManifest,
         DecisionStageManifest,
         FourModelOutputs,
+        load_four_model_manifest,
+        validate_four_model_manifest,
         write_four_model_manifest,
     )
     from checkpoint_utils import checkpoint_metadata
@@ -72,6 +76,16 @@ def _write_progress(root: Path, payload: dict) -> None:
     (root / "autorun_progress.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _read_progress(root: Path) -> dict:
+    path = root / "autorun_progress.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
 def _read_phase_metric(checkpoint_path: Path, *keys: str) -> float | None:
     metadata = checkpoint_metadata(checkpoint_path)
     current: object = metadata
@@ -97,6 +111,100 @@ def _write_phase_report(root: Path, phase: str, payload: dict) -> Path:
     report_path = phase_dir / f"{phase}.json"
     report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return report_path
+
+
+def _load_phase_report(root: Path, phase: str) -> dict | None:
+    path = root / "phase_reports" / f"{phase}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _latest_passed_attempt(attempts: list[dict]) -> dict | None:
+    passed = [entry for entry in attempts if bool(entry.get("passed", False))]
+    if not passed:
+        return None
+    return max(passed, key=lambda entry: int(entry.get("attempt", 0)))
+
+
+def _resume_validated_decision_checkpoint(root: Path, task: str, threshold: float) -> tuple[Path | None, list[PhaseAttemptResult]]:
+    validated = root / "human" / task / f"{task}_validated.pt"
+    report = _load_phase_report(root, task)
+    if not validated.exists() or report is None:
+        return None, []
+    passed = _latest_passed_attempt(report.get("attempts", []))
+    if passed is None:
+        return None, []
+    acc = float(passed.get("metrics", {}).get("accuracy", 0.0))
+    if acc < threshold:
+        return None, []
+    attempts = [
+        PhaseAttemptResult(
+            phase=str(entry["phase"]),
+            attempt=int(entry["attempt"]),
+            metrics={k: float(v) for k, v in dict(entry.get("metrics", {})).items()},
+            passed=bool(entry.get("passed", False)),
+        )
+        for entry in report.get("attempts", [])
+    ]
+    return validated, attempts
+
+
+def _resume_validated_belief_checkpoint(root: Path, thresholds: TaskThresholds) -> tuple[Path | None, list[PhaseAttemptResult]]:
+    validated = root / "human" / "belief" / "belief_validated.pt"
+    report = _load_phase_report(root, "belief")
+    if not validated.exists() or report is None:
+        return None, []
+    passed = _latest_passed_attempt(report.get("attempts", []))
+    if passed is None:
+        return None, []
+    metrics = dict(passed.get("metrics", {}))
+    if (
+        float(metrics.get("card_owner_acc", 0.0)) < thresholds.belief_hidden_acc
+        or float(metrics.get("constraint_consistency", 0.0)) < thresholds.belief_consistency
+        or float(metrics.get("void_suit_acc", 0.0)) < 0.55
+        or float(metrics.get("half_pair_acc", 0.0)) < 0.55
+        or float(metrics.get("calibration_score", 0.0)) < 0.45
+    ):
+        return None, []
+    attempts = [
+        PhaseAttemptResult(
+            phase=str(entry["phase"]),
+            attempt=int(entry["attempt"]),
+            metrics={k: float(v) for k, v in dict(entry.get("metrics", {})).items()},
+            passed=bool(entry.get("passed", False)),
+        )
+        for entry in report.get("attempts", [])
+    ]
+    return validated, attempts
+
+
+def _resume_human_manifest(root: Path) -> Path | None:
+    manifest_path = root / "human" / "human_pretrain_manifest.json"
+    if not manifest_path.exists():
+        return None
+    _manifest, errors = validate_four_model_manifest(manifest_path)
+    if errors:
+        return None
+    return manifest_path
+
+
+def _resume_joint_manifest(root: Path) -> Path | None:
+    progress = _read_progress(root)
+    current_manifest = progress.get("current_manifest")
+    if isinstance(current_manifest, str) and Path(current_manifest).exists():
+        return Path(current_manifest)
+    manifest_path = root / "joint" / "joint_manifest.json"
+    if manifest_path.exists():
+        try:
+            load_four_model_manifest(manifest_path)
+        except Exception:
+            return None
+        return manifest_path
+    return None
 
 
 def _task_from_record_payload(record: dict) -> str | None:
@@ -365,65 +473,109 @@ def run_autorun(
 
     decision_stages = default_decision_stages()
     belief_stage = default_belief_stage()
-    phase_history: list[dict] = []
+    progress = _read_progress(root)
+    phase_history: list[dict] = list(progress.get("phase_history", []))
 
     outputs: dict[str, Path] = {}
-    for stage in decision_stages:
-        ckpt, attempts = _train_decision_phase(
+    current_manifest = _resume_human_manifest(root)
+    if current_manifest is not None:
+        manifest = load_four_model_manifest(current_manifest)
+        outputs = {
+            "bidding": manifest.outputs.bidding,
+            "passing": manifest.outputs.passing,
+            "playing": manifest.outputs.playing,
+            "belief": manifest.outputs.belief,
+        }
+    else:
+        threshold_map = {
+            "bidding": thresholds.bidding_acc,
+            "passing": thresholds.passing_acc,
+            "playing": thresholds.playing_acc,
+        }
+        for stage in decision_stages:
+            resumed_ckpt, resumed_attempts = _resume_validated_decision_checkpoint(root, stage.task, threshold_map[stage.task])
+            if resumed_ckpt is not None:
+                outputs[stage.task] = resumed_ckpt
+                if not any(entry.get("phase") == stage.task for entry in phase_history):
+                    phase_history.extend(asdict(a) for a in resumed_attempts)
+                continue
+            ckpt, attempts = _train_decision_phase(
+                data_path=data_path,
+                root=root / "human",
+                stage=stage,
+                device=device,
+                workers=workers,
+                max_steps=decision_max_steps,
+                no_amp=no_amp,
+                min_epochs=stage.min_epochs,
+                target_acc_streak=2,
+                thresholds=thresholds,
+                max_retries=max_phase_retries,
+            )
+            outputs[stage.task] = ckpt
+            phase_history.extend(asdict(a) for a in attempts)
+            _write_progress(root, {"phase_history": phase_history})
+
+        belief_ckpt, belief_attempts = _resume_validated_belief_checkpoint(root, thresholds)
+        if belief_ckpt is not None:
+            outputs["belief"] = belief_ckpt
+            if not any(entry.get("phase") == "belief" for entry in phase_history):
+                phase_history.extend(asdict(a) for a in belief_attempts)
+        else:
+            belief_ckpt, belief_attempts = _train_belief_phase(
+                data_path=data_path,
+                root=root / "human",
+                stage=belief_stage,
+                device=device,
+                workers=workers,
+                max_steps=belief_max_steps,
+                no_amp=no_amp,
+                target_hidden_streak=2,
+                thresholds=thresholds,
+                max_retries=max_phase_retries,
+            )
+            outputs["belief"] = belief_ckpt
+            phase_history.extend(asdict(a) for a in belief_attempts)
+            _write_progress(root, {"phase_history": phase_history})
+
+        current_manifest = write_four_model_manifest(
+            root / "human" / "human_pretrain_manifest.json",
             data_path=data_path,
-            root=root / "human",
-            stage=stage,
             device=device,
             workers=workers,
-            max_steps=decision_max_steps,
-            no_amp=no_amp,
-            min_epochs=stage.min_epochs,
-            target_acc_streak=2,
-            thresholds=thresholds,
-            max_retries=max_phase_retries,
+            decision_stages=decision_stages,
+            belief_stage=belief_stage,
+            outputs=FourModelOutputs(
+                bidding=outputs["bidding"],
+                passing=outputs["passing"],
+                playing=outputs["playing"],
+                belief=outputs["belief"],
+            ),
+            metadata={
+                "training_stage": "human_pretrain",
+                "phase_history": phase_history,
+            },
         )
-        outputs[stage.task] = ckpt
-        phase_history.extend(asdict(a) for a in attempts)
-        _write_progress(root, {"phase_history": phase_history})
 
-    belief_ckpt, belief_attempts = _train_belief_phase(
-        data_path=data_path,
-        root=root / "human",
-        stage=belief_stage,
-        device=device,
-        workers=workers,
-        max_steps=belief_max_steps,
-        no_amp=no_amp,
-        target_hidden_streak=2,
-        thresholds=thresholds,
-        max_retries=max_phase_retries,
-    )
-    outputs["belief"] = belief_ckpt
-    phase_history.extend(asdict(a) for a in belief_attempts)
-    _write_progress(root, {"phase_history": phase_history})
+    resumed_joint_manifest = _resume_joint_manifest(root)
+    if resumed_joint_manifest is not None:
+        current_manifest = resumed_joint_manifest
 
-    human_manifest = write_four_model_manifest(
-        root / "human" / "human_pretrain_manifest.json",
-        data_path=data_path,
-        device=device,
-        workers=workers,
-        decision_stages=decision_stages,
-        belief_stage=belief_stage,
-        outputs=FourModelOutputs(
-            bidding=outputs["bidding"],
-            passing=outputs["passing"],
-            playing=outputs["playing"],
-            belief=outputs["belief"],
-        ),
-        metadata={
-            "training_stage": "human_pretrain",
-            "phase_history": phase_history,
-        },
-    )
-
-    current_manifest = human_manifest
     joint_passed = False
-    for attempt in range(1, max_joint_attempts + 1):
+    completed_joint_attempts = sum(1 for entry in phase_history if entry.get("phase") == "joint")
+    if completed_joint_attempts > 0 and current_manifest is not None:
+        joint_passed, _existing_metrics = _validate_joint_manifest(current_manifest, thresholds)
+        if joint_passed:
+            _write_progress(
+                root,
+                {
+                    "phase_history": phase_history,
+                    "current_manifest": str(current_manifest),
+                },
+            )
+            return current_manifest
+
+    for attempt in range(completed_joint_attempts + 1, max_joint_attempts + 1):
         sim_data = data_root / f"joint_cycle_{attempt:03d}.ndjson"
         mix = default_selfplay_mix(selfplay_games_per_cycle)
         generate_selfplay_dataset(

@@ -163,6 +163,28 @@ Recommended new-stack flow:
    - `ml/checkpoints/four_model_joint/governance/last_fixed_suite_eval.json`
    - `ml/checkpoints/four_model_joint/governance/best_fixed_suite_manifest.json`
 
+Run management for the current four-model architecture:
+
+- `just start`
+- `just inspect`
+- `just status`
+- `just stop`
+- `just resume`
+
+Behavior:
+
+- `just inspect` uses the current tracked run when available; otherwise it falls back to the most recently modified directory in `ml/runs`.
+- `just inspect target=stderr` tails `autorun.stderr.log`.
+- `just inspect target=progress` prints `autorun_progress.json`.
+- `just resume run_name=<name>` works for managed runs with `run_config.json` and for older four-model runs by inferring configuration from `human_pretrain_manifest.json` or `joint_manifest.json`.
+- default start profile is intentionally Windows-safe:
+  - `device=cuda`
+  - `workers=0`
+  - `selfplay_games=64`
+  - `max_joint_attempts=16`
+  - `fixed_suite=ml/eval/fixed_deals_100.json`
+  - `fixed_suite_max_cases=16`
+
 ---
 
 ## 1. Project Goals

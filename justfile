@@ -135,6 +135,69 @@ check-four-model-manifest manifest="ml/checkpoints/four_model_human/human_pretra
     @echo "Validating four-model manifest {{manifest}} using virtual environment python: {{python}}"
     {{python}} ml/check_four_model_manifest.py --manifest {{manifest}}
 
+# Inspect the latest run or a specific run from Git Bash.
+# Examples:
+#   just inspect
+#   just inspect run_name=four_model_cuda_strict_20260312_114500
+#   just inspect target=stderr
+#   just inspect target=progress
+#   just inspect lines=120
+inspect run_name="" target="stdout" lines="80":
+    @run_arg="{{run_name}}"; \
+      case "$run_arg" in run_name=*) run_arg="${run_arg#run_name=}" ;; run=*) run_arg="${run_arg#run=}" ;; esac; \
+      target_arg="{{target}}"; \
+      case "$target_arg" in target=*) target_arg="${target_arg#target=}" ;; esac; \
+      lines_arg="{{lines}}"; \
+      case "$lines_arg" in lines=*) lines_arg="${lines_arg#lines=}" ;; esac; \
+      if [ -z "$run_arg" ]; then run_arg="$({{python}} ml/run_manager.py current 2>/dev/null | tr -d '\r' | sed -n 's/.*\"run_name\": *\"\\([^\"]*\\)\".*/\\1/p')"; fi; \
+      if [ -n "$run_arg" ]; then run_path="ml/runs/$run_arg"; else run_path="$(ls -td ml/runs/* 2>/dev/null | head -n 1)"; fi; \
+      if [ -z "$run_path" ] || [ ! -d "$run_path" ]; then echo "No run directory found."; exit 1; fi; \
+      echo "Inspecting run: $run_path"; \
+      case "$target_arg" in \
+        stdout) tail -n "$lines_arg" -f "$run_path/autorun.stdout.log" ;; \
+        stderr) tail -n "$lines_arg" -f "$run_path/autorun.stderr.log" ;; \
+        progress) if [ -f "$run_path/autorun_progress.json" ]; then cat "$run_path/autorun_progress.json"; else echo "No autorun_progress.json yet."; fi ;; \
+        *) echo "Unsupported inspect target: $target_arg"; echo "Use target=stdout|stderr|progress"; exit 2 ;; \
+      esac
+
+# Start a detached four-model autorun with optimized Windows-safe defaults.
+start run_name="" data="ml/data/human_dataset_canonical.ndjson" device="cuda" workers="0" selfplay_games="64" max_joint_attempts="16" fixed_suite="ml/eval/fixed_deals_100.json" fixed_suite_max_cases="16": install-ml-deps ensure-ml-server-release
+    @run_arg="{{run_name}}"; \
+      case "$run_arg" in run_name=*) run_arg="${run_arg#run_name=}" ;; esac; \
+      data_arg="{{data}}"; \
+      case "$data_arg" in data=*) data_arg="${data_arg#data=}" ;; esac; \
+      device_arg="{{device}}"; \
+      case "$device_arg" in device=*) device_arg="${device_arg#device=}" ;; esac; \
+      workers_arg="{{workers}}"; \
+      case "$workers_arg" in workers=*) workers_arg="${workers_arg#workers=}" ;; esac; \
+      games_arg="{{selfplay_games}}"; \
+      case "$games_arg" in selfplay_games=*) games_arg="${games_arg#selfplay_games=}" ;; esac; \
+      attempts_arg="{{max_joint_attempts}}"; \
+      case "$attempts_arg" in max_joint_attempts=*) attempts_arg="${attempts_arg#max_joint_attempts=}" ;; esac; \
+      suite_arg="{{fixed_suite}}"; \
+      case "$suite_arg" in fixed_suite=*) suite_arg="${suite_arg#fixed_suite=}" ;; esac; \
+      suite_cases_arg="{{fixed_suite_max_cases}}"; \
+      case "$suite_cases_arg" in fixed_suite_max_cases=*) suite_cases_arg="${suite_cases_arg#fixed_suite_max_cases=}" ;; esac; \
+      {{python}} ml/run_manager.py start ${run_arg:+--run-name "$run_arg"} --data "$data_arg" --device "$device_arg" --workers "$workers_arg" --selfplay-games-per-cycle "$games_arg" --max-joint-attempts "$attempts_arg" --fixed-suite "$suite_arg" --fixed-suite-max-cases "$suite_cases_arg"
+
+# Resume the current tracked run or a specific run using the stored run configuration.
+resume run_name="": install-ml-deps ensure-ml-server-release
+    @run_arg="{{run_name}}"; \
+      case "$run_arg" in run_name=*) run_arg="${run_arg#run_name=}" ;; esac; \
+      {{python}} ml/run_manager.py resume ${run_arg:+--run-name "$run_arg"}
+
+# Stop the current tracked run or a specific run by PID tree.
+stop run_name="":
+    @run_arg="{{run_name}}"; \
+      case "$run_arg" in run_name=*) run_arg="${run_arg#run_name=}" ;; esac; \
+      {{python}} ml/run_manager.py stop ${run_arg:+--run-name "$run_arg"}
+
+# Show current tracked run status.
+status run_name="":
+    @run_arg="{{run_name}}"; \
+      case "$run_arg" in run_name=*) run_arg="${run_arg#run_name=}" ;; esac; \
+      {{python}} ml/run_manager.py status ${run_arg:+--run-name "$run_arg"}
+
 # Benchmark belief+decision runtime latency on replay-exported canonical states.
 benchmark-four-model-runtime manifest="ml/checkpoints/four_model_human/human_pretrain_manifest.json" data="ml/data/human_dataset.ndjson" max_records="128" device="cpu":
     @echo "Benchmarking four-model runtime on {{data}} using virtual environment python: {{python}}"

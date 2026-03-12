@@ -99,6 +99,14 @@ Operational tooling:
    - `docs/ml/PASSING_RULE_TEACHER.md`
    - `ml/passing_teacher.py`
    - adds interpretable suit-splitting / pair-preservation targets and teacher policy
+20. Four-model run management:
+   - `ml/run_manager.py`
+   - `just start`
+   - `just inspect`
+   - `just status`
+   - `just stop`
+   - `just resume`
+   - `resume` supports both managed runs and older four-model runs by inferring config from manifests
 
 Order of implementation should follow:
 
