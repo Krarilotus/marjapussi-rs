@@ -145,6 +145,23 @@ def train(
     global_step = 0
     if checkpoint is not None:
         global_step = int(metadata.get("global_step", 0))
+    remaining_epochs = max(0, int(epochs) - start_epoch)
+    if remaining_epochs <= 0:
+        Log.info(
+            "Belief checkpoint already reached requested epoch budget "
+            f"({start_epoch}/{epochs}); skipping further training."
+        )
+        return {
+            "card_owner_acc": float(metadata.get("hidden_accuracy", 0.0)) if checkpoint is not None else 0.0,
+            "constraint_consistency": float(
+                metadata.get("belief_metrics", {}).get("constraint_consistency", 1.0)
+            )
+            if checkpoint is not None
+            else 1.0,
+            "epochs_seen": float(start_epoch),
+            "global_step": float(global_step),
+        }
+
     best_hidden_acc = -1.0
     streak = 0
     min_epochs = max(1, int(min_epochs))
@@ -152,9 +169,9 @@ def train(
     overall_t0 = time.time()
 
     last_metrics: dict[str, float] = {}
-    for epoch_idx in range(epochs):
+    for epoch_idx in range(remaining_epochs):
         epochs_seen = start_epoch + epoch_idx + 1
-        Log.phase(f"Belief Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs})")
+        Log.phase(f"Belief Epoch {epochs_seen} (+{epoch_idx + 1}/{remaining_epochs})")
         ds = BeliefCachedDataset(cached_samples)
         loader = DataLoader(
             ds,
@@ -268,12 +285,12 @@ def train(
                 elapsed = time.time() - t0
                 samples_per_sec = (step * batch) / max(elapsed, 1e-6)
                 remaining_steps = max(0, steps_per_epoch - step)
-                remaining_epochs = max(0, epochs - epoch_idx - 1)
-                eta_seconds = (remaining_steps + remaining_epochs * steps_per_epoch) * (
+                remaining_epoch_steps = max(0, remaining_epochs - epoch_idx - 1)
+                eta_seconds = (remaining_steps + remaining_epoch_steps * steps_per_epoch) * (
                     elapsed / max(1, step)
                 )
                 Log.opt(
-                    f"Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs}) | Step {step}/{steps_per_epoch} | "
+                    f"Epoch {epochs_seen} (+{epoch_idx + 1}/{remaining_epochs}) | Step {step}/{steps_per_epoch} | "
                     f"Loss: {sum_loss / step:.4f} | Card: {sum_card / step:.4f} | "
                     f"Aux: {sum_aux / step:.4f} | HiddenAcc: "
                     f"{(correct_hidden / max(1, total_hidden)):.3f} | {samples_per_sec:,.0f} samples/s | "
@@ -322,8 +339,8 @@ def train(
         print(f"  - HiddenAcc: {hidden_acc:.4f}")
         epoch_elapsed = time.time() - t0
         total_elapsed = time.time() - overall_t0
-        remaining_epochs = max(0, epochs - epoch_idx - 1)
-        print(f"  - Time:      Epoch: {_format_duration(epoch_elapsed)} | RunETA: {_format_duration(remaining_epochs * epoch_elapsed)} | Elapsed: {_format_duration(total_elapsed)}")
+        remaining_epoch_count = max(0, remaining_epochs - epoch_idx - 1)
+        print(f"  - Time:      Epoch: {_format_duration(epoch_elapsed)} | RunETA: {_format_duration(remaining_epoch_count * epoch_elapsed)} | Elapsed: {_format_duration(total_elapsed)}")
         print(
             f"  - BeliefQ:   VoidAcc: {void_acc:.4f} | HalfAcc: {half_acc:.4f} | "
             f"PairAcc: {pair_acc:.4f} | Calib: {calibration_score:.4f}"

@@ -29,14 +29,14 @@ except ModuleNotFoundError:
 
 def default_decision_stages() -> tuple[DecisionStageManifest, ...]:
     return (
-        DecisionStageManifest(task="bidding", epochs=12, batch=256, target_acc=0.45, min_epochs=4),
-        DecisionStageManifest(task="passing", epochs=12, batch=256, target_acc=0.40, min_epochs=4),
-        DecisionStageManifest(task="playing", epochs=12, batch=256, target_acc=0.42, min_epochs=4),
+        DecisionStageManifest(task="bidding", epochs=12, batch=512, target_acc=0.45, min_epochs=4),
+        DecisionStageManifest(task="passing", epochs=12, batch=512, target_acc=0.40, min_epochs=4),
+        DecisionStageManifest(task="playing", epochs=12, batch=1024, target_acc=0.42, min_epochs=4),
     )
 
 
 def default_belief_stage() -> BeliefStageManifest:
-    return BeliefStageManifest(epochs=12, batch=256, target_hidden_acc=0.70, min_epochs=4)
+    return BeliefStageManifest(epochs=12, batch=512, target_hidden_acc=0.70, min_epochs=4)
 
 
 def run_human_pretraining(

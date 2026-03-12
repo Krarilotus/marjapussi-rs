@@ -45,7 +45,7 @@ def test_train_belief_from_dataset_resume_smoke(tmp_path: Path):
     ckpt_dir = tmp_path / "ckpts"
     train(
         data_path=str(data_path),
-        epochs=1,
+        epochs=2,
         batch=2,
         lr=1e-3,
         device="cpu",
@@ -60,7 +60,7 @@ def test_train_belief_from_dataset_resume_smoke(tmp_path: Path):
 
     train(
         data_path=str(data_path),
-        epochs=1,
+        epochs=2,
         batch=2,
         lr=1e-3,
         device="cpu",
@@ -73,6 +73,44 @@ def test_train_belief_from_dataset_resume_smoke(tmp_path: Path):
     )
     payload = torch.load(latest, map_location="cpu")
     assert payload["metadata"]["epochs_seen"] >= 2
+
+
+def test_train_belief_resume_skips_when_epoch_budget_reached(tmp_path: Path):
+    data_path = tmp_path / "belief.ndjson"
+    with data_path.open("w", encoding="utf-8") as handle:
+        for _ in range(2):
+            handle.write(json.dumps({"canonical_state": sample_payload()}) + "\n")
+
+    ckpt_dir = tmp_path / "ckpts"
+    train(
+        data_path=str(data_path),
+        epochs=1,
+        batch=2,
+        lr=1e-3,
+        device="cpu",
+        workers=0,
+        checkpoints_dir=ckpt_dir,
+        log_every=1,
+        max_steps=1,
+        no_amp=True,
+    )
+    latest = ckpt_dir / "belief_latest.pt"
+    before = torch.load(latest, map_location="cpu")
+    train(
+        data_path=str(data_path),
+        epochs=1,
+        batch=2,
+        lr=1e-3,
+        device="cpu",
+        workers=0,
+        checkpoints_dir=ckpt_dir,
+        log_every=1,
+        max_steps=1,
+        no_amp=True,
+        checkpoint=latest,
+    )
+    after = torch.load(latest, map_location="cpu")
+    assert after["metadata"]["epochs_seen"] == before["metadata"]["epochs_seen"] == 1
 
 
 def test_belief_cache_builds_and_reuses(tmp_path: Path):

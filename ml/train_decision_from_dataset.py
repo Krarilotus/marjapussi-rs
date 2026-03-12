@@ -176,14 +176,28 @@ def train(
 
     steps_per_epoch = max(1, ceil(len(cached_samples) / max(1, batch)))
 
+    remaining_epochs = max(0, int(epochs) - start_epoch)
+    if remaining_epochs <= 0:
+        Log.info(
+            f"{task.capitalize()} checkpoint already reached requested epoch budget "
+            f"({start_epoch}/{epochs}); skipping further training."
+        )
+        return {
+            "accuracy": float(metadata.get("accuracy", 0.0)) if checkpoint is not None else 0.0,
+            "epochs_seen": float(start_epoch),
+            "global_step": float(global_step),
+        }
+
     best_acc = -1.0
     streak = 0
     last_summary: dict[str, float] = {}
     overall_t0 = time.time()
 
-    for epoch_idx in range(epochs):
+    for epoch_idx in range(remaining_epochs):
         epochs_seen = start_epoch + epoch_idx + 1
-        Log.phase(f"{task.capitalize()} Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs})")
+        Log.phase(
+            f"{task.capitalize()} Epoch {epochs_seen} (+{epoch_idx + 1}/{remaining_epochs})"
+        )
         ds = DecisionCachedDataset(cached_samples)
         loader = DataLoader(
             ds,
@@ -267,12 +281,12 @@ def train(
                 elapsed = time.time() - t0
                 samples_per_sec = (step * batch) / max(elapsed, 1e-6)
                 remaining_steps = max(0, steps_per_epoch - step)
-                remaining_epochs = max(0, epochs - epoch_idx - 1)
-                eta_seconds = (remaining_steps + remaining_epochs * steps_per_epoch) * (
+                remaining_epoch_steps = max(0, remaining_epochs - epoch_idx - 1)
+                eta_seconds = (remaining_steps + remaining_epoch_steps * steps_per_epoch) * (
                     elapsed / max(1, step)
                 )
                 Log.opt(
-                    f"Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs}) | Step {step}/{steps_per_epoch} | "
+                    f"Epoch {epochs_seen} (+{epoch_idx + 1}/{remaining_epochs}) | Step {step}/{steps_per_epoch} | "
                     f"Loss: {sum_loss / step:.4f} | Pol: {sum_policy / step:.4f} | "
                     f"Val: {sum_value / step:.4f} | Aux: {sum_aux / step:.4f} | "
                     f"Teach: {sum_teacher / step:.4f} | "
@@ -316,8 +330,8 @@ def train(
         print(f"  - Accuracy:  {accuracy:.4f}")
         epoch_elapsed = time.time() - t0
         total_elapsed = time.time() - overall_t0
-        remaining_epochs = max(0, epochs - epoch_idx - 1)
-        print(f"  - Time:      Epoch: {_format_duration(epoch_elapsed)} | RunETA: {_format_duration(remaining_epochs * epoch_elapsed)} | Elapsed: {_format_duration(total_elapsed)}")
+        remaining_epoch_count = max(0, remaining_epochs - epoch_idx - 1)
+        print(f"  - Time:      Epoch: {_format_duration(epoch_elapsed)} | RunETA: {_format_duration(remaining_epoch_count * epoch_elapsed)} | Elapsed: {_format_duration(total_elapsed)}")
         print(
             f"  - Losses:    Total: {sum_loss / max(1, step):.4f} | "
             f"Pol: {sum_policy / max(1, step):.4f} | "
