@@ -111,8 +111,8 @@ Operational tooling:
    - `resume` supports both managed runs and older four-model runs by inferring config from manifests
 21. Human pretraining tensor cache:
    - `ml/pretrain_cache.py`
-   - caches compiled decision/belief samples under `ml/data/cache/`
-   - removes repeated NDJSON parsing and teacher-target recomputation across epochs
+   - caches packed decision/belief tensors under `ml/data/cache/`
+   - removes repeated NDJSON parsing, teacher-target recomputation, and Python batch collation across epochs
 
 Order of implementation should follow:
 

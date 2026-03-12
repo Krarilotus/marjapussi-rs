@@ -179,7 +179,8 @@ Behavior:
 - `just inspect target=stderr` tails `autorun.stderr.log`.
 - `just inspect target=progress` prints `autorun_progress.json`.
 - `just resume run_name=<name>` works for managed runs with `run_config.json` and for older four-model runs by inferring configuration from `human_pretrain_manifest.json` or `joint_manifest.json`.
-- human pretraining now caches compiled tensor samples under `ml/data/cache/` to avoid reparsing NDJSON and rebuilding teacher targets every epoch.
+- human pretraining now caches packed tensor samples under `ml/data/cache/` to avoid reparsing NDJSON, rebuilding teacher targets, and re-collating Python sample dicts every epoch.
+- packed human caches are iterated by direct shuffled tensor slicing; on this path `workers` is effectively ignored and Windows stays on the robust single-process fast path.
 - default start profile is intentionally Windows-safe:
   - `device=cuda`
   - `workers=0`

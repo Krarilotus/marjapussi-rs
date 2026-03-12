@@ -227,10 +227,12 @@ def test_decision_cache_builds_and_reuses(tmp_path: Path):
         for _ in range(2):
             handle.write(json.dumps(make_record("Bidding", 41)) + "\n")
 
-    cache_path, samples = load_or_build_decision_cache(data_path, "bidding")
+    cache_path, payload = load_or_build_decision_cache(data_path, "bidding")
     assert cache_path.exists()
-    assert len(samples) == 2
+    assert payload["sample_count"] == 2
+    assert tuple(payload["card_features"].shape) == (2, 36, 32)
+    assert payload["action_features"].shape[0] == 2
 
-    cache_path_again, samples_again = load_or_build_decision_cache(data_path, "bidding")
+    cache_path_again, payload_again = load_or_build_decision_cache(data_path, "bidding")
     assert cache_path_again == cache_path
-    assert len(samples_again) == 2
+    assert payload_again["sample_count"] == 2

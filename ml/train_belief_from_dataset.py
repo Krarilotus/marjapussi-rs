@@ -10,7 +10,6 @@ from math import ceil
 import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -37,17 +36,6 @@ def configure_torch_runtime(device: str, workers: int) -> None:
     cpu_count = os.cpu_count() or 4
     if workers > 0:
         torch.set_num_threads(max(1, min(8, cpu_count // max(1, workers))))
-
-
-class BeliefCachedDataset(Dataset):
-    def __init__(self, samples: list[dict]) -> None:
-        self.samples = samples
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> dict:
-        return self.samples[index]
 
 
 def _format_duration(seconds: float) -> str:
@@ -97,6 +85,37 @@ def collate_belief(records: list[dict]) -> dict[str, torch.Tensor] | None:
     }
 
 
+def _slice_batch(payload: dict, indices: torch.Tensor) -> dict[str, torch.Tensor]:
+    return {
+        "card_features": payload["card_features"].index_select(0, indices),
+        "player_features": payload["player_features"].index_select(0, indices),
+        "global_features": payload["global_features"].index_select(0, indices),
+        "card_targets": payload["card_targets"].index_select(0, indices),
+        "hidden_mask": payload["hidden_mask"].index_select(0, indices),
+        "candidate_mask": payload["candidate_mask"].index_select(0, indices),
+        "void_targets": payload["void_targets"].index_select(0, indices),
+        "half_targets": payload["half_targets"].index_select(0, indices),
+        "pair_targets": payload["pair_targets"].index_select(0, indices),
+    }
+
+
+def _iter_packed_batches(payload: dict, batch_size: int, *, shuffle: bool) -> tuple[int, dict[str, torch.Tensor]]:
+    sample_count = int(payload["sample_count"])
+    order = torch.randperm(sample_count) if shuffle else torch.arange(sample_count)
+    step = 0
+    for start in range(0, sample_count, batch_size):
+        step += 1
+        indices = order[start : start + batch_size]
+        yield step, _slice_batch(payload, indices)
+
+
+def _move_batch_to_device(batch_data: dict[str, torch.Tensor], device: str) -> dict[str, torch.Tensor]:
+    return {
+        key: value.to(device, non_blocking=True)
+        for key, value in batch_data.items()
+    }
+
+
 def train(
     data_path: str,
     epochs: int = 3,
@@ -134,13 +153,14 @@ def train(
     scaler = GradScaler("cuda", enabled=(device.startswith("cuda") and not no_amp))
 
     try:
-        cache_path, cached_samples = load_or_build_belief_cache(data_path)
+        cache_path, cached_payload = load_or_build_belief_cache(data_path)
         Log.info(f"Cached dataset: {cache_path}")
-        Log.info(f"Samples: {len(cached_samples):,}")
+        Log.info(f"Samples: {int(cached_payload['sample_count']):,}")
+        Log.info("Packed tensor cache: enabled (workers ignored for human pretraining)")
     except Exception as exc:
         raise RuntimeError(f"failed to build belief cache: {exc}") from exc
 
-    steps_per_epoch = max(1, ceil(len(cached_samples) / max(1, batch)))
+    steps_per_epoch = max(1, ceil(int(cached_payload["sample_count"]) / max(1, batch)))
 
     global_step = 0
     if checkpoint is not None:
@@ -172,18 +192,6 @@ def train(
     for epoch_idx in range(remaining_epochs):
         epochs_seen = start_epoch + epoch_idx + 1
         Log.phase(f"Belief Epoch {epochs_seen} (+{epoch_idx + 1}/{remaining_epochs})")
-        ds = BeliefCachedDataset(cached_samples)
-        loader = DataLoader(
-            ds,
-            batch_size=batch,
-            collate_fn=collate_belief,
-            shuffle=True,
-            num_workers=workers,
-            pin_memory=(device != "cpu"),
-            prefetch_factor=2 if workers > 0 else None,
-            persistent_workers=(workers > 0),
-        )
-
         model.train()
         step = 0
         sum_loss = 0.0
@@ -202,14 +210,8 @@ def train(
         t0 = time.time()
         stop_early = False
 
-        for batch_data in loader:
-            if batch_data is None:
-                continue
-
-            batch_data = {
-                key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
-                for key, value in batch_data.items()
-            }
+        for step, batch_data in _iter_packed_batches(cached_payload, batch, shuffle=True):
+            batch_data = _move_batch_to_device(batch_data, device)
             with autocast("cuda", enabled=(device.startswith("cuda") and not no_amp)):
                 outputs = model(
                     card_features=batch_data["card_features"],
@@ -275,7 +277,6 @@ def train(
                 calibration_sum += 1.0 - _mean_abs_error(outputs["player_pair_logits"], batch_data["pair_targets"])
                 calibration_count += 3
 
-            step += 1
             global_step += 1
             sum_loss += float(loss.item())
             sum_card += float(card_loss.item())
