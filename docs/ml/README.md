@@ -21,6 +21,7 @@ Active technical specs in this folder:
 11. `TEST_AND_VALIDATION_PLAN.md`
 12. `LEGACY_MONOLITH_STATUS.md`
 13. `BIDDING_RULE_TEACHER.md`
+14. `PASSING_RULE_TEACHER.md`
 
 Deprecated or superseded specs:
 
@@ -94,6 +95,10 @@ Operational tooling:
    - `docs/ml/BIDDING_RULE_TEACHER.md`
    - `ml/bidding_teacher.py`
    - adds interpretable `+5 / +10 / +15 / >140` rule targets and teacher policy
+19. Explicit passing-rule supervision:
+   - `docs/ml/PASSING_RULE_TEACHER.md`
+   - `ml/passing_teacher.py`
+   - adds interpretable suit-splitting / pair-preservation targets and teacher policy
 
 Order of implementation should follow:
 

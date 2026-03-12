@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from ml.tests.test_decision_state import sample_record
+from ml.tests.test_decision_state import sample_passing_record, sample_record
 from ml.train_decision_from_dataset import collate_decision, train
 
 
@@ -37,6 +37,14 @@ def test_collate_decision_pads_variable_action_counts():
     assert tuple(batch["action_mask"].shape) == (2, 2)
     assert tuple(batch["teacher_policy"].shape) == (2, 2)
     assert bool(batch["action_mask"][1, 1].item()) is True
+
+
+def test_collate_decision_builds_passing_teacher_batch():
+    batch = collate_decision([sample_passing_record(), sample_passing_record()])
+    assert batch is not None
+    assert tuple(batch["aux_targets"].shape) == (2, 8)
+    assert tuple(batch["teacher_policy"].shape) == (2, 2)
+    assert float(batch["teacher_policy"][0].sum().item()) > 0.99
 
 
 def test_train_decision_from_dataset_smoke(tmp_path: Path):

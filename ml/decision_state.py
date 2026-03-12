@@ -15,6 +15,7 @@ try:
         build_belief_targets,
     )
     from ml.neurosymbolic_state import CanonicalState
+    from ml.passing_teacher import PASSING_RULE_TARGET_NAMES, build_passing_teacher_targets
 except ModuleNotFoundError:
     from bidding_teacher import BIDDING_RULE_TARGET_NAMES, build_bidding_teacher_targets
     from four_model_phase import task_from_phase_name
@@ -26,13 +27,14 @@ except ModuleNotFoundError:
         build_belief_targets,
     )
     from neurosymbolic_state import CanonicalState
+    from passing_teacher import PASSING_RULE_TARGET_NAMES, build_passing_teacher_targets
 
 
 TASK_TO_PHASE_INDEX = {"bidding": 0, "passing": 1, "playing": 2}
 
 TASK_AUX_TARGET_NAMES = {
     "bidding": BIDDING_RULE_TARGET_NAMES,
-    "passing": ("standing_cards", "pair_points_ceiling", "point_diff"),
+    "passing": PASSING_RULE_TARGET_NAMES,
     "playing": ("standing_cards", "secured_point_floor", "point_diff"),
 }
 
@@ -158,15 +160,9 @@ def build_decision_targets_from_record(record: dict) -> DecisionTargets:
         aux_targets = teacher.aux_targets
         teacher_policy = teacher.teacher_policy
     elif task == "passing":
-        aux_targets = torch.tensor(
-            (
-            standing_norm,
-            pair_ceiling_norm,
-            _normalize_points(point_diff),
-            ),
-            dtype=torch.float32,
-        )
-        teacher_policy = None
+        teacher = build_passing_teacher_targets(record, state)
+        aux_targets = teacher.aux_targets
+        teacher_policy = teacher.teacher_policy
     else:
         aux_targets = torch.tensor(
             (

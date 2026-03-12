@@ -5,8 +5,8 @@ from ml.tests.test_decision_state import sample_record
 
 def test_decision_models_forward_shapes():
     features = build_decision_features_from_record(sample_record(), use_teacher_belief=True)
-    models = [BiddingNet(), PassingNet(), PlayingNet()]
-    for model in models:
+    models = [(BiddingNet(), 10), (PassingNet(), 8), (PlayingNet(), 3)]
+    for model, aux_dim in models:
         out = model(
             card_features=features.card_features.unsqueeze(0),
             player_features=features.player_features.unsqueeze(0),
@@ -16,4 +16,4 @@ def test_decision_models_forward_shapes():
         )
         assert tuple(out["policy_logits"].shape) == (1, 2)
         assert tuple(out["value"].shape) == (1,)
-        assert tuple(out["aux"].shape) == (1, 3)
+        assert tuple(out["aux"].shape) == (1, aux_dim)

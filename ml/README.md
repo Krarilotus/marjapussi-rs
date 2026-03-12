@@ -83,6 +83,7 @@ Decision-model foundation now exists separately:
 
 - combined decision-state compiler: `ml/decision_state.py`
 - explicit bidding rule teacher: `ml/bidding_teacher.py`
+- explicit passing rule teacher: `ml/passing_teacher.py`
 - separate model classes:
   - `ml/decision_model.py::BiddingNet`
   - `ml/decision_model.py::PassingNet`

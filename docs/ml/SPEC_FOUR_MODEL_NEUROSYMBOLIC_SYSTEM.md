@@ -91,6 +91,8 @@
   - decision-state compiler and separate `BiddingNet` / `PassingNet` / `PlayingNet` shells
   - explicit bidding-rule teacher with rule-derived step semantics, auxiliary
     targets, and legal-action teacher policy
+  - explicit passing-rule teacher with structural suit-splitting/preservation
+    targets and legal-action teacher policy
   - imitation-first human-pretraining path for separate decision models with player-quality weighting
   - stage-1 four-model human-pretraining orchestrator that runs decision models first, then belief
   - simulated-only joint-training coordinator that continues from a human-pretrained manifest
@@ -257,6 +259,11 @@ Each consumes:
   - `team_shape_gain`,
   - `standing_card_gain`,
   - `partner_helpfulness`.
+- Current implementation status:
+  - structural teacher landed with explicit supervision for suit retention,
+    blanking pressure, pair/ace/trump preservation, plus teacher ranking over
+    legal pass sets
+  - full counterfactual pass-value targets are still future work
 
 #### PlayingModel
 - Outputs:

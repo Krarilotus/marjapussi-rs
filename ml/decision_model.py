@@ -98,7 +98,7 @@ class BiddingNet(DecisionNet):
 
 class PassingNet(DecisionNet):
     def __init__(self, cfg: DecisionModelConfig | None = None) -> None:
-        super().__init__("passing", aux_dim=3, cfg=cfg)
+        super().__init__("passing", aux_dim=8, cfg=cfg)
 
 
 class PlayingNet(DecisionNet):

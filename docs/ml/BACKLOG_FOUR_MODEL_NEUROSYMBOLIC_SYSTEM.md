@@ -120,7 +120,7 @@
 
 - P0-9: Human pretraining for decision models
   - Status:
-    - in progress; imitation-first trainer with player-winrate weighting and phase-local aux targets landed
+    - in progress; imitation-first trainer with player-winrate weighting, explicit bidding teacher, and explicit passing teacher landed
   - Acceptance criteria:
     - imitation is primary loss
     - player-quality weighting active
