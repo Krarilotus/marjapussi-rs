@@ -12,9 +12,11 @@ try:
         compute_behavior_score,
     )
     from ml.eval_fixed_deals import evaluate_checkpoint_suite
+    from ml.four_model_manifest import FourModelOutputs, load_four_model_manifest, write_four_model_manifest
 except ModuleNotFoundError:
     from behavior_score import BehaviorEvalSummary, BehaviorScoreBreakdown, compute_behavior_score
     from eval_fixed_deals import evaluate_checkpoint_suite
+    from four_model_manifest import FourModelOutputs, load_four_model_manifest, write_four_model_manifest
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,38 @@ def maybe_promote_best_manifest(
     eval_path = root / "last_fixed_suite_eval.json"
     eval_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     if promoted:
-        shutil.copy2(result.manifest_path, best_manifest_path)
+        source_path = Path(result.manifest_path)
+        try:
+            manifest = load_four_model_manifest(source_path)
+        except Exception:
+            shutil.copy2(source_path, best_manifest_path)
+        else:
+            snapshot_root = root / "best_fixed_suite_snapshot"
+            if snapshot_root.exists():
+                shutil.rmtree(snapshot_root)
+            snapshot_root.mkdir(parents=True, exist_ok=True)
+
+            def _snapshot_checkpoint(src: Path, task: str) -> Path:
+                dst_dir = snapshot_root / task
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                dst = dst_dir / src.name
+                shutil.copy2(src, dst)
+                return dst
+
+            write_four_model_manifest(
+                best_manifest_path,
+                data_path=manifest.data_path,
+                device=manifest.device,
+                workers=manifest.workers,
+                decision_stages=manifest.decision_stages,
+                belief_stage=manifest.belief_stage,
+                outputs=FourModelOutputs(
+                    bidding=_snapshot_checkpoint(manifest.outputs.bidding, "bidding"),
+                    passing=_snapshot_checkpoint(manifest.outputs.passing, "passing"),
+                    playing=_snapshot_checkpoint(manifest.outputs.playing, "playing"),
+                    belief=_snapshot_checkpoint(manifest.outputs.belief, "belief"),
+                ),
+                metadata=manifest.metadata,
+            )
         score_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return promoted, best_manifest_path, payload

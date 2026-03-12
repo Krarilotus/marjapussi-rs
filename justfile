@@ -593,7 +593,21 @@ eval-fixed suite="ml/eval/fixed_deals_100.json" checkpoint="latest" max_cases="0
 
 # Convenience wrapper for four-model manifest evaluation.
 eval-fixed-four-model suite="ml/eval/fixed_deals_100.json" manifest="ml/checkpoints/four_model_human/human_pretrain_manifest.json" max_cases="0" echo="1" ansi="1":
-    @just eval-fixed suite="{{suite}}" checkpoint="{{manifest}}" max_cases="{{max_cases}}" echo="{{echo}}" ansi="{{ansi}}"
+    @suite_arg="{{suite}}"; \
+      case "$suite_arg" in suite=*) suite_arg="${suite_arg#suite=}" ;; esac; \
+      manifest_arg="{{manifest}}"; \
+      case "$manifest_arg" in manifest=*) manifest_arg="${manifest_arg#manifest=}" ;; esac; \
+      max_cases_arg="{{max_cases}}"; \
+      case "$max_cases_arg" in max_cases=*) max_cases_arg="${max_cases_arg#max_cases=}" ;; esac; \
+      echo_flag="{{echo}}"; \
+      case "$echo_flag" in echo=*) echo_flag="${echo_flag#echo=}" ;; esac; \
+      ansi_flag="{{ansi}}"; \
+      case "$ansi_flag" in ansi=*) ansi_flag="${ansi_flag#ansi=}" ;; esac; \
+      echo_opt=""; \
+      if [ "$echo_flag" = "1" ]; then echo_opt="--echo"; fi; \
+      ansi_opt="--ansi"; \
+      if [ "$ansi_flag" = "0" ]; then ansi_opt="--no-ansi"; fi; \
+      ML_SERVER_BIN="{{ml_server_bin}}" {{python}} ml/eval_fixed_deals.py --suite "$suite_arg" --all-checkpoint "$manifest_arg" --max-cases "$max_cases_arg" $echo_opt $ansi_opt
 
 # Generate random fixed-deal suites (explicit 4x9 hands) via ml_server.
 gen-fixed-deals count="100" output="ml/eval/fixed_deals_random_100.json" master_seed="20260303": install-ml-deps ensure-ml-server-release
