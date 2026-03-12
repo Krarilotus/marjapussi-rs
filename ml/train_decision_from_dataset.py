@@ -101,8 +101,12 @@ def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
             mask = F.pad(mask, (0, pad_actions), value=True)
         if teacher_policy is None:
             teacher_policy = torch.zeros(feats.shape[0], dtype=torch.float32)
-        elif pad_actions > 0:
-            teacher_policy = F.pad(teacher_policy, (0, pad_actions))
+        else:
+            teacher_policy = teacher_policy.to(dtype=torch.float32)
+            if teacher_policy.shape[0] > feats.shape[0]:
+                teacher_policy = teacher_policy[: feats.shape[0]]
+            elif teacher_policy.shape[0] < feats.shape[0]:
+                teacher_policy = F.pad(teacher_policy, (0, feats.shape[0] - teacher_policy.shape[0]))
         padded_action_feats.append(feats)
         padded_action_masks.append(mask)
         padded_teacher_policies.append(teacher_policy)

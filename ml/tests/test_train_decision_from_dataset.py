@@ -78,6 +78,38 @@ def test_collate_decision_pads_variable_action_counts():
     assert bool(batch["action_mask"][1, 1].item()) is True
 
 
+def test_collate_decision_pads_teacher_policy_to_action_count():
+    rec_a = make_record("Playing", 300)
+    rec_b = make_record("Playing", 300)
+    rec_a["obs"]["legal_actions"] = rec_a["obs"]["legal_actions"][:14]
+    rec_b["obs"]["legal_actions"] = rec_b["obs"]["legal_actions"][:6]
+    samples = []
+    for record in [rec_a, rec_b]:
+        features = build_decision_features_from_record(record, use_teacher_belief=True)
+        targets = build_decision_targets_from_record(record)
+        teacher_policy = targets.teacher_policy
+        if teacher_policy is not None and teacher_policy.numel() > 0:
+            teacher_policy = teacher_policy[:-1]
+        samples.append(
+            {
+                "card_features": features.card_features,
+                "player_features": features.player_features,
+                "global_features": features.global_features,
+                "action_features": features.action_features,
+                "action_mask": features.action_mask,
+                "policy_target": int(targets.policy_idx),
+                "value_target": float(targets.value_target),
+                "aux_targets": targets.aux_targets,
+                "sample_weight": float(targets.sample_weight),
+                "teacher_policy": teacher_policy,
+            }
+        )
+    batch = collate_decision(samples)
+    assert batch is not None
+    assert batch["teacher_policy"].shape[0] == 2
+    assert batch["teacher_policy"].shape[1] == batch["action_features"].shape[1]
+
+
 def test_collate_decision_builds_passing_teacher_batch():
     samples = []
     for record in [sample_passing_record(), sample_passing_record()]:
