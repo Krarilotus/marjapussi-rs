@@ -155,9 +155,14 @@ train-four-model-joint manifest="ml/checkpoints/four_model_human/human_pretrain_
       {{python}} ml/train_four_model_joint.py --base-manifest {{manifest}} --sim-data {{data}} --checkpoints-dir {{checkpoints_dir}} --cycles {{cycles}} --belief-max-steps {{belief_max_steps}} --decision-max-steps {{decision_max_steps}} --device cuda --workers 4 $suite_opts
 
 # Generate simulated self-play data using a four-model manifest.
-generate-four-model-selfplay manifest="ml/checkpoints/four_model_human/human_pretrain_manifest.json" output="ml/data/four_model_selfplay.ndjson" games="32" seed_start="1": install-ml-deps ensure-ml-server-release
+generate-four-model-selfplay manifest="ml/checkpoints/four_model_human/human_pretrain_manifest.json" output="ml/data/four_model_selfplay.ndjson" games="32" full_games="" bidding_games="0" passing_games="0" seed_start="1": install-ml-deps ensure-ml-server-release
     @echo "Generating four-model self-play data from {{manifest}} using virtual environment python: {{python}}"
-    ML_SERVER_BIN="{{ml_server_bin}}" {{python}} ml/generate_four_model_selfplay.py --manifest {{manifest}} --output {{output}} --games {{games}} --seed-start {{seed_start}}
+    @full_arg="{{full_games}}"; \
+      extra_args=""; \
+      if [ -n "$full_arg" ]; then extra_args="$extra_args --full-games $full_arg"; fi; \
+      if [ "{{bidding_games}}" != "0" ]; then extra_args="$extra_args --bidding-games {{bidding_games}}"; fi; \
+      if [ "{{passing_games}}" != "0" ]; then extra_args="$extra_args --passing-games {{passing_games}}"; fi; \
+      ML_SERVER_BIN="{{ml_server_bin}}" {{python}} ml/generate_four_model_selfplay.py --manifest {{manifest}} --output {{output}} --games {{games}} --seed-start {{seed_start}} $extra_args
 
 # End-to-end four-model loop: regenerate self-play data every cycle, then run one joint update.
 # By default, lightweight fixed-suite governance is enabled on 16 cases of the 100-case suite.

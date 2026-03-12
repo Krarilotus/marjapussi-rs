@@ -6,10 +6,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 try:
-    from ml.generate_four_model_selfplay import SelfPlaySummary, generate_selfplay_dataset
+    from ml.generate_four_model_selfplay import (
+        SelfPlaySummary,
+        default_selfplay_mix,
+        generate_selfplay_dataset,
+    )
     from ml.train_four_model_joint import run_joint_training
 except ModuleNotFoundError:
-    from generate_four_model_selfplay import SelfPlaySummary, generate_selfplay_dataset
+    from generate_four_model_selfplay import SelfPlaySummary, default_selfplay_mix, generate_selfplay_dataset
     from train_four_model_joint import run_joint_training
 
 
@@ -50,10 +54,14 @@ def run_end_to_end_training(
 
     for cycle_idx in range(cycles):
         sim_data_path = data_dir / f"cycle_{cycle_idx + 1:03d}.ndjson"
+        mix = default_selfplay_mix(games_per_cycle)
         selfplay_summary = generate_selfplay_dataset(
             current_manifest,
             sim_data_path,
             games=games_per_cycle,
+            full_games=mix.full_games,
+            bidding_games=mix.bidding_games,
+            passing_games=mix.passing_games,
             seed_start=seed_start + cycle_idx * games_per_cycle,
         )
         current_manifest = run_joint_training(

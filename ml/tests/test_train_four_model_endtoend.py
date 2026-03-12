@@ -7,9 +7,27 @@ from ml import train_four_model_endtoend as mod
 def test_end_to_end_trainer_regenerates_data_each_cycle(tmp_path: Path, monkeypatch):
     calls: list[tuple[str, str]] = []
 
-    def fake_generate(manifest_path, output_path, *, games, seed_start, max_steps=300):
+    def fake_generate(
+        manifest_path,
+        output_path,
+        *,
+        games,
+        full_games=None,
+        bidding_games=0,
+        passing_games=0,
+        seed_start,
+        max_steps=300,
+        max_seed_tries_per_target=32,
+    ):
         Path(output_path).write_text("{}", encoding="utf-8")
-        return mod.SelfPlaySummary(games=games, records=games, avg_actions_per_game=10.0)
+        return mod.SelfPlaySummary(
+            games=games,
+            records=games,
+            avg_actions_per_game=10.0,
+            task_counts={"bidding": bidding_games, "passing": passing_games, "playing": full_games or games},
+            generated_by_target={"full": full_games or games, "bidding": bidding_games, "passing": passing_games},
+            skipped_by_target={"full": 0, "bidding": 0, "passing": 0},
+        )
 
     def fake_joint(
         base_manifest_path,

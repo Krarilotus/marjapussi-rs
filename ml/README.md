@@ -118,6 +118,8 @@ Decision-model foundation now exists separately:
 - simulated self-play dataset generator for the four-model stack:
   - `ml/generate_four_model_selfplay.py`
   - `just generate-four-model-selfplay`
+  - supports phase-balanced top-ups via `--full-games`, `--bidding-games`, `--passing-games`
+  - joint training now uses explicit `bidding`/`passing` top-ups instead of relying on full-game self-play alone
 - convenience end-to-end joint step:
   - `ml/train_four_model_endtoend.py`
   - `just train-four-model-endtoend`
@@ -136,7 +138,7 @@ Decision-model foundation now exists separately:
 Recommended new-stack flow:
 
 1. `just pretrain-four-model-human data=ml/data/human_dataset_canonical.ndjson`
-2. `just generate-four-model-selfplay manifest=ml/checkpoints/four_model_human/human_pretrain_manifest.json output=ml/data/four_model_selfplay.ndjson games=64`
+2. `just generate-four-model-selfplay manifest=ml/checkpoints/four_model_human/human_pretrain_manifest.json output=ml/data/four_model_selfplay.ndjson games=64 full_games=48 bidding_games=8 passing_games=8`
 3. `just train-four-model-joint manifest=ml/checkpoints/four_model_human/human_pretrain_manifest.json data=ml/data/four_model_selfplay.ndjson`
 4. inspect:
    - `ml/checkpoints/four_model_joint/joint_manifest.json`

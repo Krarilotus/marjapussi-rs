@@ -198,7 +198,7 @@
 - Task 9:
   - generate simulated self-play datasets directly from a four-model manifest
   - Status:
-    - done
+    - done; generator now supports explicit phase-balanced `full`/`bidding`/`passing` mixes so passing coverage does not depend on accidental policy behavior
 - Task 10:
   - run end-to-end cycles that refresh simulated data before each joint-training step
   - Status:

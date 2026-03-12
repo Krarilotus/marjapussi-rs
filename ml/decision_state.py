@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 try:
+    from ml.four_model_phase import task_from_phase_name
     from ml.env import obs_to_tensors
     from ml.neurosymbolic_dataset import (
         NUM_OWNER_CLASSES,
@@ -14,6 +15,7 @@ try:
     )
     from ml.neurosymbolic_state import CanonicalState
 except ModuleNotFoundError:
+    from four_model_phase import task_from_phase_name
     from env import obs_to_tensors
     from neurosymbolic_dataset import (
         NUM_OWNER_CLASSES,
@@ -23,17 +25,6 @@ except ModuleNotFoundError:
     )
     from neurosymbolic_state import CanonicalState
 
-
-PHASE_TO_TASK = {
-    "Bidding": "bidding",
-    "Raising": "bidding",
-    "PassingForth": "passing",
-    "PassingBack": "passing",
-    "StartTrick": "playing",
-    "Trick": "playing",
-    "AnsweringPair": "playing",
-    "AnsweringHalf": "playing",
-}
 
 TASK_TO_PHASE_INDEX = {"bidding": 0, "passing": 1, "playing": 2}
 
@@ -73,19 +64,6 @@ def _teacher_belief_onehot(state: CanonicalState) -> torch.Tensor:
             row[owner_idx] = 1.0
         rows.append(row)
     return torch.tensor(rows, dtype=torch.float32)
-
-
-def task_from_phase_name(phase_name: str) -> str:
-    task = PHASE_TO_TASK.get(phase_name)
-    if task is not None:
-        return task
-    if phase_name.startswith("AnsweringPair"):
-        return "playing"
-    if phase_name.startswith("AnsweringHalf"):
-        return "playing"
-    return "playing"
-
-
 def build_decision_features_from_record(
     record: dict,
     use_teacher_belief: bool = True,

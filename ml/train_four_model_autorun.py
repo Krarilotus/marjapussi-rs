@@ -14,7 +14,8 @@ try:
         write_four_model_manifest,
     )
     from ml.checkpoint_utils import checkpoint_metadata
-    from ml.generate_four_model_selfplay import generate_selfplay_dataset
+    from ml.four_model_phase import task_from_phase_name
+    from ml.generate_four_model_selfplay import default_selfplay_mix, generate_selfplay_dataset
     from ml.train_belief_from_dataset import train as train_belief
     from ml.train_decision_from_dataset import train as train_decision
     from ml.train_four_model_human_pretrain import default_belief_stage, default_decision_stages
@@ -27,7 +28,8 @@ except ModuleNotFoundError:
         write_four_model_manifest,
     )
     from checkpoint_utils import checkpoint_metadata
-    from generate_four_model_selfplay import generate_selfplay_dataset
+    from four_model_phase import task_from_phase_name
+    from generate_four_model_selfplay import default_selfplay_mix, generate_selfplay_dataset
     from train_belief_from_dataset import train as train_belief
     from train_decision_from_dataset import train as train_decision
     from train_four_model_human_pretrain import default_belief_stage, default_decision_stages
@@ -125,13 +127,7 @@ def _summarize_selfplay_tasks(data_path: str | Path) -> dict[str, int]:
             phase_name = _task_from_record_payload(record)
             if not phase_name:
                 continue
-            task = phase_name
-            if phase_name in ("Bidding", "Raising") or phase_name.startswith("Bidding") or phase_name.startswith("Raising"):
-                task = "bidding"
-            elif phase_name in ("PassingForth", "PassingBack") or phase_name.startswith("Passing"):
-                task = "passing"
-            else:
-                task = "playing"
+            task = task_from_phase_name(phase_name)
             counts[task] += 1
     return counts
 
@@ -429,10 +425,14 @@ def run_autorun(
     joint_passed = False
     for attempt in range(1, max_joint_attempts + 1):
         sim_data = data_root / f"joint_cycle_{attempt:03d}.ndjson"
+        mix = default_selfplay_mix(selfplay_games_per_cycle)
         generate_selfplay_dataset(
             current_manifest,
             sim_data,
             games=selfplay_games_per_cycle,
+            full_games=mix.full_games,
+            bidding_games=mix.bidding_games,
+            passing_games=mix.passing_games,
             seed_start=selfplay_seed_start + (attempt - 1) * selfplay_games_per_cycle,
         )
         coverage_ok, coverage_metrics = _validate_selfplay_coverage(sim_data, thresholds)

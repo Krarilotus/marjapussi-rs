@@ -74,6 +74,7 @@ Operational tooling:
 15. Simulated self-play generator for the four-model stack:
    - `ml/generate_four_model_selfplay.py`
    - `just generate-four-model-selfplay`
+   - supports phase-balanced `full`/`bidding`/`passing` mixes
    - `just train-four-model-endtoend`
    - `ml/train_four_model_endtoend.py`
    - end-to-end loop can also perform fixed-suite governance every cycle
@@ -101,6 +102,7 @@ Verified smoke path:
 
 1. `pretrain-four-model-human`
 2. `generate-four-model-selfplay`
+   - for joint training, use phase-balanced self-play instead of pure full-game sampling
 3. `train-four-model-joint`
 4. `eval-fixed-four-model`
 

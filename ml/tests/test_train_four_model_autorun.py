@@ -56,7 +56,7 @@ def test_run_autorun_retries_joint_until_metrics_pass(tmp_path: Path, monkeypatc
     monkeypatch.setattr(mod, "train_decision", fake_decision)
     monkeypatch.setattr(mod, "train_belief", fake_belief)
 
-    def fake_selfplay(manifest, output, *, games, seed_start, max_steps=300):
+    def fake_selfplay(manifest, output, *, games, full_games=None, bidding_games=0, passing_games=0, seed_start, max_steps=300, max_seed_tries_per_target=32):
         calls["selfplay"] += 1
         records = [{"canonical_state": {"global": {"phase": "Bidding"}}} for _ in range(8)]
         records.extend({"canonical_state": {"global": {"phase": "PassingForth"}}} for _ in range(4))
