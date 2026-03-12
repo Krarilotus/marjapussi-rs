@@ -82,6 +82,7 @@ New fast belief pretraining path:
 Decision-model foundation now exists separately:
 
 - combined decision-state compiler: `ml/decision_state.py`
+- explicit bidding rule teacher: `ml/bidding_teacher.py`
 - separate model classes:
   - `ml/decision_model.py::BiddingNet`
   - `ml/decision_model.py::PassingNet`
@@ -134,6 +135,22 @@ Decision-model foundation now exists separately:
   - `just eval-fixed checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json`
   - `just eval-fixed-four-model manifest=...`
   - `just ui checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json`
+
+Bidding-specific supervision:
+
+- the bidding model now trains on more than imitation plus coarse makeable-bid bounds
+- `canonical_state.strategy` carries explicit bidding-history semantics:
+  - first-step jumps,
+  - team bid counts,
+  - Ace-signal presence,
+  - over-`140` admissibility,
+  - conservative estimated bid value,
+  - recommended next jump
+- `ml/bidding_teacher.py` converts those semantics into:
+  - interpretable bidding aux targets
+  - a teacher policy over legal bid/stop actions
+- reference rules are documented in:
+  - `docs/ml/BIDDING_RULE_TEACHER.md`
 
 Recommended new-stack flow:
 

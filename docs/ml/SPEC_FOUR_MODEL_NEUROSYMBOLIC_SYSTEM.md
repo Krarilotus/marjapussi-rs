@@ -21,6 +21,8 @@
   - passing,
   - information exchange,
   - trick play.
+- Ensure bidding learns the informational meaning of common step patterns instead
+  of collapsing into `120/125` safety bids.
 - Ensure training runs are operationally controllable and phase durations are bounded.
 
 ### Success metrics
@@ -87,6 +89,8 @@
   - standalone `BeliefNet` pretraining path
   - exact small-state conflict-free belief decoder scaffold
   - decision-state compiler and separate `BiddingNet` / `PassingNet` / `PlayingNet` shells
+  - explicit bidding-rule teacher with rule-derived step semantics, auxiliary
+    targets, and legal-action teacher policy
   - imitation-first human-pretraining path for separate decision models with player-quality weighting
   - stage-1 four-model human-pretraining orchestrator that runs decision models first, then belief
   - simulated-only joint-training coordinator that continues from a human-pretrained manifest
@@ -237,6 +241,13 @@ Each consumes:
   - `contract_success`,
   - `overbid_risk`,
   - `underbid_risk` or stop-bid insufficiency proxy.
+- Additional supervised semantics:
+  - Ace-signal present for the team,
+  - admissibility of bids above `140`,
+  - recommended next jump size,
+  - conservative estimated bid value,
+  - partner first-step signal,
+  - local pair/half support summary.
 
 #### PassingModel
 - Outputs:

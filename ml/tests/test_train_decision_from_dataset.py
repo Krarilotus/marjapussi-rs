@@ -20,10 +20,11 @@ def test_collate_decision_builds_batch_tensors():
     assert batch is not None
     assert tuple(batch["card_features"].shape) == (2, 36, 32)
     assert tuple(batch["player_features"].shape) == (2, 4, 18)
-    assert tuple(batch["global_features"].shape) == (2, 15)
+    assert tuple(batch["global_features"].shape) == (2, 30)
     assert tuple(batch["action_features"].shape) == (2, 2, 87)
     assert tuple(batch["policy_targets"].shape) == (2,)
-    assert tuple(batch["aux_targets"].shape) == (2, 3)
+    assert tuple(batch["aux_targets"].shape) == (2, 10)
+    assert tuple(batch["teacher_policy"].shape) == (2, 2)
 
 
 def test_collate_decision_pads_variable_action_counts():
@@ -34,6 +35,7 @@ def test_collate_decision_pads_variable_action_counts():
     assert batch is not None
     assert tuple(batch["action_features"].shape) == (2, 2, 87)
     assert tuple(batch["action_mask"].shape) == (2, 2)
+    assert tuple(batch["teacher_policy"].shape) == (2, 2)
     assert bool(batch["action_mask"][1, 1].item()) is True
 
 

@@ -116,6 +116,21 @@ pub struct CanonicalStrategyState {
     pub visible_pair_points_ceiling: i32,
     pub makeable_bid_floor: i32,
     pub makeable_bid_ceiling: i32,
+    pub bidding_current_highest_bid: i32,
+    pub bidding_team_bid_count: usize,
+    pub bidding_self_bid_count: usize,
+    pub bidding_partner_bid_count: usize,
+    pub bidding_team_first_step: i32,
+    pub bidding_self_first_step: i32,
+    pub bidding_partner_first_step: i32,
+    pub bidding_team_has_ace_signal: bool,
+    pub bidding_allow_over_140: bool,
+    pub bidding_estimated_value: i32,
+    pub bidding_recommended_step: i32,
+    pub bidding_own_ace_count: usize,
+    pub bidding_own_unmatched_halves: usize,
+    pub bidding_own_small_pair_count: usize,
+    pub bidding_own_big_pair_count: usize,
 }
 
 pub fn build_canonical_state(game: &Game, pov: PlaceAtTable) -> CanonicalState {
@@ -367,7 +382,7 @@ fn build_team_states(obs: &Observation) -> Vec<CanonicalTeamState> {
 }
 
 fn build_strategy_state(
-    _game: &Game,
+    game: &Game,
     obs: &Observation,
     cards: &[CanonicalCardState],
     players: &[CanonicalPlayerState],
@@ -413,6 +428,7 @@ fn build_strategy_state(
     let raw_bid_ceiling = 115 + visible_pair_points_ceiling + (my_team_ceiling - my_team_floor) / 2;
     let makeable_bid_floor = clamp_bid(raw_bid_floor.max(120));
     let makeable_bid_ceiling = clamp_bid(raw_bid_ceiling.max(makeable_bid_floor));
+    let bidding_summary = derive_bidding_summary(game);
 
     let _player_count = players.len();
 
@@ -425,6 +441,184 @@ fn build_strategy_state(
         visible_pair_points_ceiling,
         makeable_bid_floor,
         makeable_bid_ceiling,
+        bidding_current_highest_bid: bidding_summary.current_highest_bid,
+        bidding_team_bid_count: bidding_summary.team_bid_count,
+        bidding_self_bid_count: bidding_summary.self_bid_count,
+        bidding_partner_bid_count: bidding_summary.partner_bid_count,
+        bidding_team_first_step: bidding_summary.team_first_step,
+        bidding_self_first_step: bidding_summary.self_first_step,
+        bidding_partner_first_step: bidding_summary.partner_first_step,
+        bidding_team_has_ace_signal: bidding_summary.team_has_ace_signal,
+        bidding_allow_over_140: bidding_summary.allow_over_140,
+        bidding_estimated_value: bidding_summary.estimated_value,
+        bidding_recommended_step: bidding_summary.recommended_step,
+        bidding_own_ace_count: bidding_summary.own_ace_count,
+        bidding_own_unmatched_halves: bidding_summary.own_unmatched_halves,
+        bidding_own_small_pair_count: bidding_summary.own_small_pair_count,
+        bidding_own_big_pair_count: bidding_summary.own_big_pair_count,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BiddingSummary {
+    current_highest_bid: i32,
+    team_bid_count: usize,
+    self_bid_count: usize,
+    partner_bid_count: usize,
+    team_first_step: i32,
+    self_first_step: i32,
+    partner_first_step: i32,
+    team_has_ace_signal: bool,
+    allow_over_140: bool,
+    estimated_value: i32,
+    recommended_step: i32,
+    own_ace_count: usize,
+    own_unmatched_halves: usize,
+    own_small_pair_count: usize,
+    own_big_pair_count: usize,
+}
+
+fn derive_bidding_summary(game: &Game) -> BiddingSummary {
+    use crate::game::cards::{Suit, Value};
+    use crate::game::gameevent::ActionType;
+
+    let my_seat = game.state.player_at_turn.0;
+    let partner_seat = (my_seat + 2) % 4;
+    let hand = &game.state.players[my_seat as usize].cards;
+
+    let mut current_highest_bid = 115i32;
+    let mut team_bid_count = 0usize;
+    let mut self_bid_count = 0usize;
+    let mut partner_bid_count = 0usize;
+    let mut team_first_step: Option<i32> = None;
+    let mut self_first_step: Option<i32> = None;
+    let mut partner_first_step: Option<i32> = None;
+    for (action, place) in &game.state.bidding_history {
+        if let ActionType::NewBid(value) = action {
+            let jump = *value - current_highest_bid;
+            if place.0 == my_seat {
+                team_bid_count += 1;
+                self_bid_count += 1;
+                if team_first_step.is_none() {
+                    team_first_step = Some(jump);
+                }
+                if self_first_step.is_none() {
+                    self_first_step = Some(jump);
+                }
+            } else if place.0 == partner_seat {
+                team_bid_count += 1;
+                partner_bid_count += 1;
+                if team_first_step.is_none() {
+                    team_first_step = Some(jump);
+                }
+                if partner_first_step.is_none() {
+                    partner_first_step = Some(jump);
+                }
+            }
+            current_highest_bid = *value;
+        }
+    }
+
+    let own_ace_count = hand.iter().filter(|card| card.value == Value::Ace).count();
+    let ten_count = hand.iter().filter(|card| card.value == Value::Ten).count() as i32;
+    let king_count = hand.iter().filter(|card| card.value == Value::King).count() as i32;
+    let ober_count = hand.iter().filter(|card| card.value == Value::Ober).count() as i32;
+
+    let mut own_unmatched_halves = 0usize;
+    let mut own_small_pair_count = 0usize;
+    let mut own_big_pair_count = 0usize;
+    let mut pair_points = 0i32;
+    for &suit in &[Suit::Acorns, Suit::Green, Suit::Bells, Suit::Red] {
+        let has_king = hand.iter().any(|card| card.suit == suit && card.value == Value::King);
+        let has_ober = hand.iter().any(|card| card.suit == suit && card.value == Value::Ober);
+        if has_king && has_ober {
+            pair_points += points_pair(suit).0;
+            if matches!(suit, Suit::Red | Suit::Bells) {
+                own_big_pair_count += 1;
+            } else {
+                own_small_pair_count += 1;
+            }
+        } else if has_king || has_ober {
+            own_unmatched_halves += 1;
+        }
+    }
+
+    let team_has_ace_signal = own_ace_count > 0
+        || team_first_step == Some(5)
+        || partner_first_step == Some(5);
+    let inferred_pair_from_10 = partner_first_step == Some(10) && own_unmatched_halves >= 2;
+    let inferred_pair_from_15 = partner_first_step == Some(15);
+    let inferred_from_double_five_with_strength = team_first_step == Some(5)
+        && partner_first_step == Some(5)
+        && ((own_small_pair_count + own_big_pair_count) > 0 || own_unmatched_halves >= 3);
+    let inferred_two_pairs_without_ace = !team_has_ace_signal
+        && (own_small_pair_count + own_big_pair_count) >= 1
+        && partner_first_step == Some(10)
+        && own_unmatched_halves >= 1;
+    let allow_over_140 = inferred_pair_from_15
+        || inferred_pair_from_10
+        || inferred_from_double_five_with_strength
+        || inferred_two_pairs_without_ace;
+
+    let recommended_step = if team_bid_count == 0 {
+        if own_ace_count > 0 {
+            5
+        } else if own_big_pair_count > 0 {
+            15
+        } else if own_small_pair_count > 0 || own_unmatched_halves >= 3 {
+            10
+        } else {
+            0
+        }
+    } else if team_bid_count == 1 {
+        let first_was_ace_signal = team_first_step == Some(5);
+        if own_big_pair_count > 0 {
+            15
+        } else if own_small_pair_count > 0 || own_unmatched_halves >= 3 {
+            10
+        } else if first_was_ace_signal && own_unmatched_halves >= 2 {
+            5
+        } else {
+            0
+        }
+    } else if own_ace_count > 0 || (own_small_pair_count + own_big_pair_count) > 0 || own_unmatched_halves >= 2 {
+        5
+    } else {
+        0
+    };
+
+    let own_standing_est =
+        (own_ace_count as i32) * 12 + ten_count * 9 + king_count * 6 + ober_count * 4 + (own_unmatched_halves as i32) * 2;
+    let mut estimated_value = 115 + own_standing_est + (pair_points / 2);
+    if partner_first_step == Some(15) {
+        estimated_value += 20;
+    } else if partner_first_step == Some(10) {
+        estimated_value += 10;
+    }
+    if !allow_over_140 {
+        estimated_value = estimated_value.min(140);
+    }
+    if !team_has_ace_signal && !inferred_two_pairs_without_ace {
+        estimated_value = estimated_value.min(140);
+    }
+    estimated_value = estimated_value.clamp(115, 200);
+
+    BiddingSummary {
+        current_highest_bid,
+        team_bid_count,
+        self_bid_count,
+        partner_bid_count,
+        team_first_step: team_first_step.unwrap_or(0),
+        self_first_step: self_first_step.unwrap_or(0),
+        partner_first_step: partner_first_step.unwrap_or(0),
+        team_has_ace_signal,
+        allow_over_140,
+        estimated_value,
+        recommended_step,
+        own_ace_count,
+        own_unmatched_halves,
+        own_small_pair_count,
+        own_big_pair_count,
     }
 }
 
@@ -684,6 +878,16 @@ mod tests {
             }
             assert_eq!(state.cards[idx].confirmed_hidden_rel, Some(2));
         }
+    }
+
+    #[test]
+    fn canonical_state_includes_bidding_summary_fields() {
+        let game = start_bidding_game();
+        let state = build_canonical_state(&game, PlaceAtTable(0));
+        assert_eq!(state.strategy.bidding_current_highest_bid, 115);
+        assert_eq!(state.strategy.bidding_team_bid_count, 0);
+        assert!(state.strategy.bidding_estimated_value >= 115);
+        assert!(state.strategy.bidding_recommended_step % 5 == 0);
     }
 
     #[test]

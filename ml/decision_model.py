@@ -15,7 +15,7 @@ except ModuleNotFoundError:
 class DecisionModelConfig:
     card_feature_dim: int = 32
     player_feature_dim: int = 18
-    global_feature_dim: int = 15
+    global_feature_dim: int = 30
     model_dim: int = 192
     player_dim: int = 96
     action_dim: int = 128
@@ -93,7 +93,7 @@ class DecisionNet(nn.Module):
 
 class BiddingNet(DecisionNet):
     def __init__(self, cfg: DecisionModelConfig | None = None) -> None:
-        super().__init__("bidding", aux_dim=3, cfg=cfg)
+        super().__init__("bidding", aux_dim=10, cfg=cfg)
 
 
 class PassingNet(DecisionNet):

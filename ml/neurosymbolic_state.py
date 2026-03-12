@@ -68,6 +68,21 @@ class CanonicalStrategyState:
     visible_pair_points_ceiling: int
     makeable_bid_floor: int
     makeable_bid_ceiling: int
+    bidding_current_highest_bid: int
+    bidding_team_bid_count: int
+    bidding_self_bid_count: int
+    bidding_partner_bid_count: int
+    bidding_team_first_step: int
+    bidding_self_first_step: int
+    bidding_partner_first_step: int
+    bidding_team_has_ace_signal: bool
+    bidding_allow_over_140: bool
+    bidding_estimated_value: int
+    bidding_recommended_step: int
+    bidding_own_ace_count: int
+    bidding_own_unmatched_halves: int
+    bidding_own_small_pair_count: int
+    bidding_own_big_pair_count: int
 
 
 @dataclass(frozen=True)
@@ -173,6 +188,21 @@ class CanonicalState:
             visible_pair_points_ceiling=int(data["strategy"]["visible_pair_points_ceiling"]),
             makeable_bid_floor=int(data["strategy"]["makeable_bid_floor"]),
             makeable_bid_ceiling=int(data["strategy"]["makeable_bid_ceiling"]),
+            bidding_current_highest_bid=int(data["strategy"].get("bidding_current_highest_bid", 115)),
+            bidding_team_bid_count=int(data["strategy"].get("bidding_team_bid_count", 0)),
+            bidding_self_bid_count=int(data["strategy"].get("bidding_self_bid_count", 0)),
+            bidding_partner_bid_count=int(data["strategy"].get("bidding_partner_bid_count", 0)),
+            bidding_team_first_step=int(data["strategy"].get("bidding_team_first_step", 0)),
+            bidding_self_first_step=int(data["strategy"].get("bidding_self_first_step", 0)),
+            bidding_partner_first_step=int(data["strategy"].get("bidding_partner_first_step", 0)),
+            bidding_team_has_ace_signal=bool(data["strategy"].get("bidding_team_has_ace_signal", False)),
+            bidding_allow_over_140=bool(data["strategy"].get("bidding_allow_over_140", False)),
+            bidding_estimated_value=int(data["strategy"].get("bidding_estimated_value", data["strategy"]["makeable_bid_floor"])),
+            bidding_recommended_step=int(data["strategy"].get("bidding_recommended_step", 0)),
+            bidding_own_ace_count=int(data["strategy"].get("bidding_own_ace_count", 0)),
+            bidding_own_unmatched_halves=int(data["strategy"].get("bidding_own_unmatched_halves", 0)),
+            bidding_own_small_pair_count=int(data["strategy"].get("bidding_own_small_pair_count", 0)),
+            bidding_own_big_pair_count=int(data["strategy"].get("bidding_own_big_pair_count", 0)),
         )
         belief_targets = None
         if data.get("belief_targets") is not None:

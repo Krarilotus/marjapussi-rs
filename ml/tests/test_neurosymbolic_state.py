@@ -134,6 +134,21 @@ def sample_payload() -> dict:
             "visible_pair_points_ceiling": 40,
             "makeable_bid_floor": 120,
             "makeable_bid_ceiling": 145,
+            "bidding_current_highest_bid": 140,
+            "bidding_team_bid_count": 1,
+            "bidding_self_bid_count": 0,
+            "bidding_partner_bid_count": 1,
+            "bidding_team_first_step": 5,
+            "bidding_self_first_step": 0,
+            "bidding_partner_first_step": 5,
+            "bidding_team_has_ace_signal": True,
+            "bidding_allow_over_140": False,
+            "bidding_estimated_value": 145,
+            "bidding_recommended_step": 5,
+            "bidding_own_ace_count": 1,
+            "bidding_own_unmatched_halves": 2,
+            "bidding_own_small_pair_count": 0,
+            "bidding_own_big_pair_count": 0,
         },
         "belief_targets": {
             "schema_version": CANONICAL_STATE_SCHEMA_VERSION,
@@ -176,6 +191,8 @@ def test_canonical_state_helpers_expose_unknown_and_partner_cards():
     assert state.confirmed_partner_cards == (1,)
     assert state.belief_targets is not None
     assert state.belief_targets.card_owner_classes[1] == "PartnerHand"
+    assert state.strategy.bidding_partner_first_step == 5
+    assert state.strategy.bidding_team_has_ace_signal is True
 
 
 def test_from_record_merges_top_level_belief_targets():

@@ -20,6 +20,7 @@ Active technical specs in this folder:
 10. `SPEC_PARALLEL_MODEL_ARCHITECTURE_V2.md`
 11. `TEST_AND_VALIDATION_PLAN.md`
 12. `LEGACY_MONOLITH_STATUS.md`
+13. `BIDDING_RULE_TEACHER.md`
 
 Deprecated or superseded specs:
 
@@ -89,6 +90,10 @@ Operational tooling:
    - `ml/four_model_runtime.py`
    - `ml/eval_fixed_deals.py`
    - `ml/ui_server.py`
+18. Explicit bidding-rule supervision:
+   - `docs/ml/BIDDING_RULE_TEACHER.md`
+   - `ml/bidding_teacher.py`
+   - adds interpretable `+5 / +10 / +15 / >140` rule targets and teacher policy
 
 Order of implementation should follow:
 

@@ -106,6 +106,7 @@ def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
     value_targets = []
     aux_targets = []
     sample_weights = []
+    teacher_policies = []
 
     for record in records:
         try:
@@ -123,6 +124,7 @@ def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
         value_targets.append(float(targets.value_target))
         aux_targets.append(targets.aux_targets)
         sample_weights.append(float(targets.sample_weight))
+        teacher_policies.append(targets.teacher_policy)
 
     if not card_feats:
         return None
@@ -131,13 +133,19 @@ def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
     action_feat_dim = action_feats[0].shape[1]
     padded_action_feats = []
     padded_action_masks = []
-    for feats, mask in zip(action_feats, action_masks):
+    padded_teacher_policies = []
+    for feats, mask, teacher_policy in zip(action_feats, action_masks, teacher_policies):
         pad_actions = max_actions - feats.shape[0]
         if pad_actions > 0:
             feats = F.pad(feats, (0, 0, 0, pad_actions))
             mask = F.pad(mask, (0, pad_actions), value=True)
+        if teacher_policy is None:
+            teacher_policy = torch.zeros(feats.shape[0], dtype=torch.float32)
+        elif pad_actions > 0:
+            teacher_policy = F.pad(teacher_policy, (0, pad_actions))
         padded_action_feats.append(feats)
         padded_action_masks.append(mask)
+        padded_teacher_policies.append(teacher_policy)
 
     return {
         "card_features": torch.stack(card_feats),
@@ -149,6 +157,7 @@ def collate_decision(records: list[dict]) -> dict[str, torch.Tensor] | None:
         "value_targets": torch.tensor(value_targets, dtype=torch.float32),
         "aux_targets": torch.stack(aux_targets),
         "sample_weights": torch.tensor(sample_weights, dtype=torch.float32),
+        "teacher_policy": torch.stack(padded_teacher_policies),
     }
 
 
@@ -235,6 +244,7 @@ def train(
         sum_policy = 0.0
         sum_value = 0.0
         sum_aux = 0.0
+        sum_teacher = 0.0
         correct = 0
         total = 0
         t0 = time.time()
@@ -263,9 +273,17 @@ def train(
                     reduction="none",
                 )
                 policy_loss = (per_policy_loss * weights).sum() / weights.sum().clamp(min=1.0)
+                teacher_policy = batch_data["teacher_policy"]
+                if teacher_policy.sum().item() > 0.0:
+                    teacher_log_probs = F.log_softmax(outputs["policy_logits"], dim=-1)
+                    teacher_loss = -(
+                        teacher_policy * teacher_log_probs
+                    ).sum(dim=-1).mean()
+                else:
+                    teacher_loss = outputs["policy_logits"].new_tensor(0.0)
                 value_loss = F.mse_loss(outputs["value"], batch_data["value_targets"])
                 aux_loss = F.mse_loss(outputs["aux"], batch_data["aux_targets"])
-                loss = policy_loss + 0.25 * value_loss + 0.20 * aux_loss
+                loss = policy_loss + 0.25 * value_loss + 0.20 * aux_loss + 0.35 * teacher_loss
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -285,6 +303,7 @@ def train(
             sum_policy += float(policy_loss.item())
             sum_value += float(value_loss.item())
             sum_aux += float(aux_loss.item())
+            sum_teacher += float(teacher_loss.item())
 
             if step % max(1, min(log_every, max(1, steps_per_epoch // 8))) == 0:
                 elapsed = time.time() - t0
@@ -293,6 +312,7 @@ def train(
                     f"Epoch {epochs_seen} (+{epoch_idx + 1}/{epochs}) | Step {step}/{steps_per_epoch} | "
                     f"Loss: {sum_loss / step:.4f} | Pol: {sum_policy / step:.4f} | "
                     f"Val: {sum_value / step:.4f} | Aux: {sum_aux / step:.4f} | "
+                    f"Teach: {sum_teacher / step:.4f} | "
                     f"Acc: {(correct / max(1, total)):.3f} | {samples_per_sec:,.0f} samples/s",
                     end="",
                 )
@@ -316,6 +336,7 @@ def train(
                 "policy_loss": sum_policy / max(1, step),
                 "value_loss": sum_value / max(1, step),
                 "aux_loss": sum_aux / max(1, step),
+                "teacher_loss": sum_teacher / max(1, step),
                 "aux_targets": TASK_AUX_TARGET_NAMES[task],
             },
         }
@@ -332,7 +353,8 @@ def train(
         print(
             f"  - Losses:    Total: {sum_loss / max(1, step):.4f} | "
             f"Pol: {sum_policy / max(1, step):.4f} | "
-            f"Val: {sum_value / max(1, step):.4f} | Aux: {sum_aux / max(1, step):.4f}"
+            f"Val: {sum_value / max(1, step):.4f} | Aux: {sum_aux / max(1, step):.4f} | "
+            f"Teach: {sum_teacher / max(1, step):.4f}"
         )
         print(f"  - Saved:     {latest_path}")
         last_summary = {
@@ -342,6 +364,7 @@ def train(
             "policy_loss": sum_policy / max(1, step),
             "value_loss": sum_value / max(1, step),
             "aux_loss": sum_aux / max(1, step),
+            "teacher_loss": sum_teacher / max(1, step),
         }
 
         if target_acc > 0.0 and epochs_seen >= max(1, int(min_epochs)):

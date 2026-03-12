@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 try:
+    from ml.bidding_teacher import BIDDING_RULE_TARGET_NAMES, build_bidding_teacher_targets
     from ml.four_model_phase import task_from_phase_name
     from ml.env import obs_to_tensors
     from ml.neurosymbolic_dataset import (
@@ -15,6 +16,7 @@ try:
     )
     from ml.neurosymbolic_state import CanonicalState
 except ModuleNotFoundError:
+    from bidding_teacher import BIDDING_RULE_TARGET_NAMES, build_bidding_teacher_targets
     from four_model_phase import task_from_phase_name
     from env import obs_to_tensors
     from neurosymbolic_dataset import (
@@ -29,7 +31,7 @@ except ModuleNotFoundError:
 TASK_TO_PHASE_INDEX = {"bidding": 0, "passing": 1, "playing": 2}
 
 TASK_AUX_TARGET_NAMES = {
-    "bidding": ("makeable_bid_floor", "makeable_bid_ceiling", "win_signal"),
+    "bidding": BIDDING_RULE_TARGET_NAMES,
     "passing": ("standing_cards", "pair_points_ceiling", "point_diff"),
     "playing": ("standing_cards", "secured_point_floor", "point_diff"),
 }
@@ -53,6 +55,7 @@ class DecisionTargets:
     value_target: float
     aux_targets: torch.Tensor
     sample_weight: float
+    teacher_policy: torch.Tensor | None = None
 
 
 def _teacher_belief_onehot(state: CanonicalState) -> torch.Tensor:
@@ -84,8 +87,28 @@ def build_decision_features_from_record(
     task = task_from_phase_name(state.global_state.phase)
     phase_oh = torch.zeros(3, dtype=torch.float32)
     phase_oh[{"bidding": 0, "passing": 1, "playing": 2}[task]] = 1.0
+    bidding_features = torch.tensor(
+        [
+            state.strategy.bidding_current_highest_bid / 420.0,
+            min(1.0, state.strategy.bidding_team_bid_count / 4.0),
+            min(1.0, state.strategy.bidding_self_bid_count / 4.0),
+            min(1.0, state.strategy.bidding_partner_bid_count / 4.0),
+            state.strategy.bidding_team_first_step / 15.0,
+            state.strategy.bidding_self_first_step / 15.0,
+            state.strategy.bidding_partner_first_step / 15.0,
+            float(state.strategy.bidding_team_has_ace_signal),
+            float(state.strategy.bidding_allow_over_140),
+            state.strategy.bidding_estimated_value / 420.0,
+            state.strategy.bidding_recommended_step / 15.0,
+            min(1.0, state.strategy.bidding_own_ace_count / 4.0),
+            min(1.0, state.strategy.bidding_own_unmatched_halves / 4.0),
+            min(1.0, state.strategy.bidding_own_small_pair_count / 2.0),
+            min(1.0, state.strategy.bidding_own_big_pair_count / 2.0),
+        ],
+        dtype=torch.float32,
+    )
 
-    global_features = torch.cat([base.global_features, phase_oh], dim=0)
+    global_features = torch.cat([base.global_features, phase_oh, bidding_features], dim=0)
     card_features = torch.cat([base.card_features, belief_owner], dim=1)
 
     return DecisionFeatures(
@@ -131,28 +154,35 @@ def build_decision_targets_from_record(record: dict) -> DecisionTargets:
     )
 
     if task == "bidding":
-        aux_values = (
-            _normalize_bid(state.strategy.makeable_bid_floor),
-            _normalize_bid(state.strategy.makeable_bid_ceiling),
-            win_signal,
-        )
+        teacher = build_bidding_teacher_targets(record, state)
+        aux_targets = teacher.aux_targets
+        teacher_policy = teacher.teacher_policy
     elif task == "passing":
-        aux_values = (
+        aux_targets = torch.tensor(
+            (
             standing_norm,
             pair_ceiling_norm,
             _normalize_points(point_diff),
+            ),
+            dtype=torch.float32,
         )
+        teacher_policy = None
     else:
-        aux_values = (
+        aux_targets = torch.tensor(
+            (
             standing_norm,
             secured_floor_norm,
             _normalize_points(point_diff),
+            ),
+            dtype=torch.float32,
         )
+        teacher_policy = None
 
     return DecisionTargets(
         task=task,
         policy_idx=int(record.get("action_taken", 0)),
         value_target=_normalize_points(point_diff),
-        aux_targets=torch.tensor(aux_values, dtype=torch.float32),
+        aux_targets=aux_targets,
         sample_weight=_quality_weight_from_record(record),
+        teacher_policy=teacher_policy,
     )

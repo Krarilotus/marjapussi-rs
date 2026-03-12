@@ -29,7 +29,7 @@ def sample_record() -> dict:
             "phase": "Bidding",
             "event_tokens": [1, 2, 3],
             "legal_actions": [
-                {"action_token": 41, "bid_value": 140, "card_idx": None, "suit_idx": None},
+                {"action_token": 41, "bid_value": 145, "card_idx": None, "suit_idx": None},
                 {"action_token": 42, "bid_value": None, "card_idx": None, "suit_idx": None},
             ],
         },
@@ -45,7 +45,7 @@ def test_build_decision_features_from_record_shapes():
     assert features.task == "bidding"
     assert tuple(features.card_features.shape) == (36, 32)
     assert tuple(features.player_features.shape) == (4, 18)
-    assert tuple(features.global_features.shape) == (15,)
+    assert tuple(features.global_features.shape) == (30,)
     assert tuple(features.action_features.shape) == (2, 87)
     assert tuple(features.action_mask.shape) == (2,)
 
@@ -54,8 +54,10 @@ def test_build_decision_targets_from_record_uses_winrate_weighting():
     targets = build_decision_targets_from_record(sample_record())
     assert targets.task == "bidding"
     assert targets.policy_idx == 0
-    assert tuple(targets.aux_targets.shape) == (3,)
+    assert tuple(targets.aux_targets.shape) == (10,)
     assert targets.sample_weight > 1.5
+    assert targets.teacher_policy is not None
+    assert abs(float(targets.teacher_policy.sum().item()) - 1.0) < 1e-6
 
 
 def test_task_from_phase_name_normalizes_parameterized_answer_phases():
