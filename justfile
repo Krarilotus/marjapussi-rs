@@ -579,17 +579,21 @@ ui checkpoint="latest" port="8765": install-ml-deps ensure-ml-server-ui-runtime
 #   just eval-fixed checkpoint=latest max_cases=10
 #   just eval-fixed checkpoint=1 echo=0
 #   just eval-fixed checkpoint=ml/checkpoints/four_model_human/human_pretrain_manifest.json
-eval-fixed suite="ml/eval/fixed_deals_100.json" checkpoint="latest" max_cases="0" echo="1" ansi="1": install-ml-deps ensure-ml-server-release
-    @suite_arg="{{suite}}"; \
-      case "$suite_arg" in suite=*) suite_arg="${suite_arg#suite=}" ;; esac; \
-      checkpoint_arg="{{checkpoint}}"; \
-      case "$checkpoint_arg" in checkpoint=*) checkpoint_arg="${checkpoint_arg#checkpoint=}" ;; esac; \
-      max_cases_arg="{{max_cases}}"; \
-      case "$max_cases_arg" in max_cases=*) max_cases_arg="${max_cases_arg#max_cases=}" ;; esac; \
-      echo_flag="{{echo}}"; \
-      case "$echo_flag" in echo=*) echo_flag="${echo_flag#echo=}" ;; esac; \
-      ansi_flag="{{ansi}}"; \
-      case "$ansi_flag" in ansi=*) ansi_flag="${ansi_flag#ansi=}" ;; esac; \
+eval-fixed arg1="" arg2="" arg3="" arg4="" arg5="": install-ml-deps ensure-ml-server-release
+    @suite_arg="ml/eval/fixed_deals_100.json"; \
+      checkpoint_arg="latest"; \
+      max_cases_arg="0"; \
+      echo_flag="1"; \
+      ansi_flag="1"; \
+      for arg in "{{arg1}}" "{{arg2}}" "{{arg3}}" "{{arg4}}" "{{arg5}}"; do \
+        case "$arg" in \
+          suite=*) suite_arg="${arg#suite=}" ;; \
+          checkpoint=*) checkpoint_arg="${arg#checkpoint=}" ;; \
+          max_cases=*) max_cases_arg="${arg#max_cases=}" ;; \
+          echo=*) echo_flag="${arg#echo=}" ;; \
+          ansi=*) ansi_flag="${arg#ansi=}" ;; \
+        esac; \
+      done; \
       echo_opt=""; \
       if [ "$echo_flag" = "1" ]; then echo_opt="--echo"; fi; \
       ansi_opt="--ansi"; \
@@ -597,17 +601,21 @@ eval-fixed suite="ml/eval/fixed_deals_100.json" checkpoint="latest" max_cases="0
       ML_SERVER_BIN="{{ml_server_bin}}" {{python}} ml/eval_fixed_deals.py --suite "$suite_arg" --all-checkpoint "$checkpoint_arg" --max-cases "$max_cases_arg" $echo_opt $ansi_opt
 
 # Convenience wrapper for four-model manifest evaluation.
-eval-fixed-four-model suite="ml/eval/fixed_deals_100.json" manifest="ml/checkpoints/four_model_human/human_pretrain_manifest.json" max_cases="0" echo="1" ansi="1":
-    @suite_arg="{{suite}}"; \
-      case "$suite_arg" in suite=*) suite_arg="${suite_arg#suite=}" ;; esac; \
-      manifest_arg="{{manifest}}"; \
-      case "$manifest_arg" in manifest=*) manifest_arg="${manifest_arg#manifest=}" ;; esac; \
-      max_cases_arg="{{max_cases}}"; \
-      case "$max_cases_arg" in max_cases=*) max_cases_arg="${max_cases_arg#max_cases=}" ;; esac; \
-      echo_flag="{{echo}}"; \
-      case "$echo_flag" in echo=*) echo_flag="${echo_flag#echo=}" ;; esac; \
-      ansi_flag="{{ansi}}"; \
-      case "$ansi_flag" in ansi=*) ansi_flag="${ansi_flag#ansi=}" ;; esac; \
+eval-fixed-four-model arg1="" arg2="" arg3="" arg4="" arg5="":
+    @suite_arg="ml/eval/fixed_deals_100.json"; \
+      manifest_arg="ml/checkpoints/four_model_human/human_pretrain_manifest.json"; \
+      max_cases_arg="0"; \
+      echo_flag="1"; \
+      ansi_flag="1"; \
+      for arg in "{{arg1}}" "{{arg2}}" "{{arg3}}" "{{arg4}}" "{{arg5}}"; do \
+        case "$arg" in \
+          suite=*) suite_arg="${arg#suite=}" ;; \
+          manifest=*) manifest_arg="${arg#manifest=}" ;; \
+          max_cases=*) max_cases_arg="${arg#max_cases=}" ;; \
+          echo=*) echo_flag="${arg#echo=}" ;; \
+          ansi=*) ansi_flag="${arg#ansi=}" ;; \
+        esac; \
+      done; \
       echo_opt=""; \
       if [ "$echo_flag" = "1" ]; then echo_opt="--echo"; fi; \
       ansi_opt="--ansi"; \
