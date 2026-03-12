@@ -131,6 +131,7 @@ def train(
     target_hidden_streak: int = 2,
     no_amp: bool = False,
     checkpoint: str | Path | None = None,
+    ignore_checkpoint_epoch_budget: bool = False,
 ) -> dict[str, float]:
     configure_torch_runtime(device, workers)
     ckpt_dir = Path(checkpoints_dir)
@@ -143,6 +144,8 @@ def train(
         metadata = dict(payload.get("metadata", {}))
         start_epoch = int(metadata.get("epochs_seen", metadata.get("epoch", 0)))
         Log.info(f"Resumed belief checkpoint: {checkpoint}")
+        if ignore_checkpoint_epoch_budget:
+            start_epoch = 0
     Log.success(
         f"Belief pretraining | epochs={epochs} | batch={batch} | workers={workers} | device={device}"
     )

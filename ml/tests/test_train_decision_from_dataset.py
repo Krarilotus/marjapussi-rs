@@ -221,6 +221,47 @@ def test_train_decision_resume_skips_when_epoch_budget_reached(tmp_path: Path):
     assert after["metadata"]["epochs_seen"] == before["metadata"]["epochs_seen"] == 1
 
 
+def test_train_decision_ignore_checkpoint_epoch_budget_runs_again(tmp_path: Path):
+    data_path = tmp_path / "decision.ndjson"
+    with data_path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(make_record("Bidding", 41)) + "\n")
+        handle.write(json.dumps(make_record("Bidding", 41)) + "\n")
+
+    ckpt_dir = tmp_path / "ckpts"
+    train(
+        data_path=str(data_path),
+        task="bidding",
+        epochs=1,
+        batch=2,
+        lr=1e-3,
+        device="cpu",
+        workers=0,
+        checkpoints_dir=ckpt_dir,
+        log_every=1,
+        max_steps=1,
+        no_amp=True,
+    )
+    latest = ckpt_dir / "bidding_latest.pt"
+    before = torch.load(latest, map_location="cpu")
+    train(
+        data_path=str(data_path),
+        task="bidding",
+        epochs=1,
+        batch=2,
+        lr=1e-3,
+        device="cpu",
+        workers=0,
+        checkpoints_dir=ckpt_dir,
+        log_every=1,
+        max_steps=1,
+        no_amp=True,
+        checkpoint=latest,
+        ignore_checkpoint_epoch_budget=True,
+    )
+    after = torch.load(latest, map_location="cpu")
+    assert after["metadata"]["global_step"] > before["metadata"]["global_step"]
+
+
 def test_decision_cache_builds_and_reuses(tmp_path: Path):
     data_path = tmp_path / "decision.ndjson"
     with data_path.open("w", encoding="utf-8") as handle:

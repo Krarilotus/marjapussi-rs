@@ -118,6 +118,7 @@ def run_joint_training(
                 target_hidden_streak=1,
                 no_amp=no_amp,
                 checkpoint=current_outputs.belief,
+                ignore_checkpoint_epoch_budget=True,
             )
             current_outputs = FourModelOutputs(
                 bidding=current_outputs.bidding,
@@ -157,6 +158,7 @@ def run_joint_training(
                     target_acc_streak=1,
                     no_amp=no_amp,
                     checkpoint=task_outputs[stage.task],
+                    ignore_checkpoint_epoch_budget=True,
                 )
                 task_outputs[stage.task] = task_dir / f"{stage.task}_latest.pt"
 

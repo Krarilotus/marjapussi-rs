@@ -165,6 +165,7 @@ def train(
     target_acc_streak: int = 2,
     no_amp: bool = False,
     checkpoint: str | Path | None = None,
+    ignore_checkpoint_epoch_budget: bool = False,
 ) -> dict[str, float]:
     if task not in TASK_TO_MODEL:
         raise ValueError(f"unsupported task '{task}'")
@@ -181,6 +182,8 @@ def train(
         start_epoch = int(metadata.get("epochs_seen", metadata.get("epoch", 0)))
         global_step = int(metadata.get("global_step", 0))
         Log.info(f"Resumed {task} checkpoint: {checkpoint}")
+        if ignore_checkpoint_epoch_budget:
+            start_epoch = 0
     Log.success(
         f"Decision pretraining | task={task} | epochs={epochs} | batch={batch} | workers={workers} | device={device}"
     )
