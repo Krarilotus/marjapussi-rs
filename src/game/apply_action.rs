@@ -146,6 +146,7 @@ impl ActionType {
                 next_game_state.player_at_turn = next_game_state.player_at_turn.partner();
             }
             ActionType::Answer(AnswerType::NoPair) => {
+                next_game_state.partner_mut().trump = PlayerTrumpPossibilities::Ours;
                 next_game_state.phase = GamePhase::Trick;
                 next_game_state.player_at_turn = next_game_state.player_at_turn.partner();
             }
