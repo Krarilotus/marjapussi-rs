@@ -182,7 +182,13 @@ pub fn legal_question(game: &Game) -> Vec<GameAction> {
 }
 
 pub fn legal_answer(game: &Game) -> Vec<GameAction> {
-    let last_event = game.all_events.last().unwrap();
+    // The question this answer replies to (the last question asked).
+    let last_event = game
+        .all_events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.last_action.action_type, ActionType::Question(..)))
+        .expect("Trying to find answers without question asked!");
     let cards = game.state.player_at_turn().cards.clone();
     let mut actions: Vec<GameAction> = vec![];
     match last_event.last_action.action_type {
