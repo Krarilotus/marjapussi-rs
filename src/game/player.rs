@@ -106,15 +106,7 @@ pub fn create_players(names: [String; 4], cards: Option<[Vec<Card>; 4]>) -> [Pla
         //random shuffled cads
         let mut deck = get_all_cards();
         deck.shuffle(&mut rng());
-        let mut cards: [Vec<Card>; 4] = [vec![], vec![], vec![], vec![]];
-        for i in 0..4 {
-            let mut one_players_cards = vec![];
-            for c in 0..9 {
-                one_players_cards.push(deck.get(i * 9 + c).unwrap().clone());
-            }
-            cards[i] = one_players_cards;
-        }
-        cards
+        [0, 1, 2, 3].map(|i| deck[i * 9..(i + 1) * 9].to_vec())
     });
 
     let p0 = create_player(names[0].clone(), players_cards[0].clone(), 0);
