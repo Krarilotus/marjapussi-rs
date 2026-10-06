@@ -35,10 +35,33 @@ impl GameMetaInfo {
     }
 }
 
-/// Everything one player in the frontend wants to know
+/// The public part of `GameMetaInfo`: no start hands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublicInfo {
+    pub name: String,
+    pub create_time: String,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub player_names: [String; 4],
+}
+
+impl From<&GameMetaInfo> for PublicInfo {
+    fn from(m: &GameMetaInfo) -> Self {
+        PublicInfo {
+            name: m.name.clone(),
+            create_time: m.create_time.clone(),
+            start_time: m.start_time.clone(),
+            end_time: m.end_time.clone(),
+            player_names: m.player_names.clone(),
+        }
+    }
+}
+
+/// What one seat may see: public facts, its own hand and its own legal actions. Nothing here
+/// depends on another seat's hidden cards (tests/view_privacy.rs).
 #[derive(Debug, Clone)]
 pub struct GameInfoPlayer {
-    pub meta_info: GameMetaInfo,
+    pub public_info: PublicInfo,
     pub players_pressed_start: Vec<String>,
     pub players_from_perspective: [String; 4],
     pub player_at_turn: String,
@@ -54,8 +77,9 @@ pub struct GameInfoPlayer {
 
 impl GameInfoPlayer {
     pub fn from_game(game: Game, place: PlaceAtTable) -> Self {
+        let place_of_view = place.clone();
         GameInfoPlayer {
-            meta_info: game.info.clone(),
+            public_info: PublicInfo::from(&game.info),
             players_pressed_start: game.state.players_started(),
             players_from_perspective: game.state.players_perspective(place.clone()),
             player_at_turn: game
@@ -83,7 +107,13 @@ impl GameInfoPlayer {
                     }
                 }
             },
-            legal_actions: game.legal_actions.clone(),
+            // Only this seat's actions: another seat's card plays or passes would show its hand.
+            legal_actions: game
+                .legal_actions
+                .iter()
+                .filter(|a| a.player == place_of_view)
+                .cloned()
+                .collect(),
         }
     }
 }
