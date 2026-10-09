@@ -158,7 +158,6 @@ impl Game {
                 self.last_state = None;
             }
             ActionType::Answer(AnswerType::NoPair) => {
-                state.partner_mut().trump = PlayerTrumpPossibilities::Ours;
                 state.phase = GamePhase::Trick;
                 state.player_at_turn = state.player_at_turn.partner();
                 self.last_state = None;
