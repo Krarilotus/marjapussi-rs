@@ -2,37 +2,23 @@
 //!
 //! `play_levels` (which cards may be played) and `takes` / `trick_winner` (who wins a trick)
 //! are the single implementation of these rules: `cards::allowed_cards`, `Game` and
-//! `engine::fast` all call them. The test `play_levels_mirror_allowed_cards` keeps the former
-//! `Vec`-based implementation as a reference oracle on random tricks and hands.
+//! card helpers all call them.
 
 use std::fmt;
 use std::ops::{BitAnd, BitOr};
 
-use crate::game::cards::{Card, Suit, Value};
-
-pub const SUITS: [Suit; 4] = [Suit::Green, Suit::Acorns, Suit::Bells, Suit::Red];
-pub const VALUES: [Value; 9] = [
-    Value::Six,
-    Value::Seven,
-    Value::Eight,
-    Value::Nine,
-    Value::Unter,
-    Value::Ober,
-    Value::King,
-    Value::Ten,
-    Value::Ace,
-];
+use crate::game::cards::{Card, Suit, Value, CARDS};
+pub use crate::game::cards::{SUITS, VALUES};
 
 /// Bit index of a card: `suit * 9 + value`, in the engine's enum order.
+#[inline]
 pub fn index(card: &Card) -> u8 {
-    card.suit as u8 * 9 + card.value as u8
+    card.index()
 }
 
+#[inline]
 pub fn card(index: u8) -> Card {
-    Card {
-        suit: SUITS[(index / 9) as usize],
-        value: VALUES[(index % 9) as usize],
-    }
+    Card::from_index(index)
 }
 
 /// A set of cards as 36 bits.
@@ -41,7 +27,7 @@ pub struct CardSet(pub u64);
 
 impl CardSet {
     pub const EMPTY: CardSet = CardSet(0);
-    pub const ALL: CardSet = CardSet((1 << 36) - 1);
+    pub const ALL: CardSet = CardSet((1 << CARDS) - 1);
 
     pub const fn single(index: u8) -> CardSet {
         CardSet(1 << index)

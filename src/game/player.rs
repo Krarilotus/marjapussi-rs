@@ -1,3 +1,6 @@
+#![cfg_attr(not(feature = "public-api"), allow(clippy::clone_on_copy))]
+
+use crate::storage::{List, Name};
 use std::fmt::Debug;
 
 use rand::rng;
@@ -36,12 +39,13 @@ impl Debug for PlaceAtTable {
 }
 
 pub struct Player {
-    pub name: String,
+    pub name: Name,
     pub partner: PlaceAtTable,
     pub next_player: PlaceAtTable,
     pub place_at_table: PlaceAtTable,
-    pub cards: Vec<Card>,
+    pub cards: List<Card, 13>,
     last_played: Option<Card>,
+    #[cfg(feature = "public-api")]
     pub tricks: Vec<Vec<Card>>,
     pub trump: PlayerTrumpPossibilities,
     pub bidding: bool,
@@ -56,6 +60,7 @@ impl Clone for Player {
             place_at_table: self.place_at_table,
             cards: self.cards.clone(),
             last_played: self.last_played,
+            #[cfg(feature = "public-api")]
             tricks: self.tricks.clone(),
             trump: self.trump,
             bidding: self.bidding,
@@ -70,6 +75,7 @@ impl Clone for Player {
         self.place_at_table = source.place_at_table;
         self.cards.clone_from(&source.cards);
         self.last_played = source.last_played;
+        #[cfg(feature = "public-api")]
         self.tricks.clone_from(&source.tricks);
         self.trump = source.trump;
         self.bidding = source.bidding;
@@ -119,14 +125,17 @@ pub enum PlayerTrumpPossibilities {
 Creates a Single Player without partner or next_player
  */
 fn create_player(name: String, cards: Vec<Card>, place: u8) -> Player {
+    #[cfg(not(feature = "public-api"))]
+    let name = name.into();
     Player {
         name,
         bidding: true,
         next_player: PlaceAtTable(place).partner(),
         partner: PlaceAtTable(place).partner(),
         place_at_table: PlaceAtTable(place),
-        cards,
+        cards: cards.into_iter().collect(),
         last_played: None,
+        #[cfg(feature = "public-api")]
         tricks: vec![],
         trump: PlayerTrumpPossibilities::Own,
     }

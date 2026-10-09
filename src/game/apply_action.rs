@@ -1,12 +1,16 @@
 use crate::bits::{self, CardSet};
 use crate::game::cards::Card;
+#[cfg(feature = "public-api")]
+use crate::game::current_time_string;
 use crate::game::gameevent::{ActionType, AnswerType, GameAction, GameCallback, QuestionType};
+#[cfg(feature = "public-api")]
 use crate::game::gameinfo::GameMetaInfo;
 use crate::game::gamestate::{FinishedTrick, GamePhase, GameState};
 use crate::game::player::PlayerTrumpPossibilities;
 use crate::game::points::{Points, CARD_POINTS, LAST_TRICK_BONUS};
-use crate::game::{current_time_string, Game};
+use crate::game::Game;
 
+#[cfg(feature = "public-api")]
 impl ActionType {
     /// Returns the next meta info, state, callback and undo snapshot without changing `game`.
     pub fn apply_action(
@@ -49,7 +53,10 @@ impl Game {
                 }
                 if state.players_started.len() == 4 {
                     state.started = true;
-                    self.info.start_time = Some(current_time_string());
+                    #[cfg(feature = "public-api")]
+                    {
+                        self.info.start_time = Some(current_time_string());
+                    }
                     state.phase = GamePhase::Bidding;
                 }
                 self.last_state = None;
@@ -58,7 +65,7 @@ impl Game {
                 snapshot(&mut self.last_state, state);
                 state
                     .bidding_history
-                    .push((action.action_type.clone(), action.player));
+                    .push((action.action_type.to_owned(), action.player));
                 state.value = Points(value);
                 if state.phase == GamePhase::Raising {
                     state.phase = GamePhase::Trick;
@@ -81,7 +88,7 @@ impl Game {
                 snapshot(&mut self.last_state, state);
                 state
                     .bidding_history
-                    .push((action.action_type.clone(), action.player));
+                    .push((action.action_type.to_owned(), action.player));
                 state.player_at_turn_mut().bidding = false;
                 state.bidding_players -= 1;
                 let mut next_player = state.player_at_turn.next();
@@ -129,7 +136,10 @@ impl Game {
                 state.player_at_place_mut(action.player).play_card(card);
                 if state.player_at_turn().cards.is_empty() {
                     state.phase = GamePhase::Ended;
-                    self.info.end_time = Some(current_time_string());
+                    #[cfg(feature = "public-api")]
+                    {
+                        self.info.end_time = Some(current_time_string());
+                    }
                 }
             }
             ActionType::AnnounceTrump(suit) => {
@@ -201,7 +211,7 @@ impl Game {
                 }
                 if state.players_accept_undo.len() == 2 {
                     if let Some(mut previous) = self.last_state.take() {
-                        previous.players_accept_undo = vec![];
+                        previous.players_accept_undo.clear();
                         *state = previous;
                     }
                 }
@@ -210,7 +220,7 @@ impl Game {
                 if let GamePhase::PendingUndo(previous_phase) = &mut state.phase {
                     let previous = std::mem::replace(&mut **previous_phase, GamePhase::Ended);
                     state.phase = previous;
-                    state.players_accept_undo = vec![];
+                    state.players_accept_undo.clear();
                 }
                 self.last_state = None;
             }

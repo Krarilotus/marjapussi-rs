@@ -1,3 +1,6 @@
+#![cfg_attr(not(feature = "public-api"), allow(clippy::clone_on_copy))]
+
+use crate::storage::List;
 use serde::Serialize;
 
 use crate::game::cards::{Card, Suit};
@@ -31,17 +34,17 @@ pub struct FinishedTrick {
 pub struct GameState {
     pub phase: GamePhase,
     pub started: bool,
-    pub players_started: Vec<PlaceAtTable>,
-    pub players_accept_undo: Vec<PlaceAtTable>,
+    pub players_started: List<PlaceAtTable, 4>,
+    pub players_accept_undo: List<PlaceAtTable, 4>,
     pub bidding_players: u8, //starts at 4
     pub bidding_history: Vec<(ActionType, PlaceAtTable)>,
     pub trump: Option<Suit>,
-    pub trump_called: Vec<Suit>,
+    pub trump_called: List<Suit, 4>,
     pub player_at_turn: PlaceAtTable,
     pub players: [Player; 4],
     pub value: Points,
-    pub all_tricks: Vec<FinishedTrick>,
-    pub current_trick: Vec<Card>,
+    pub all_tricks: List<FinishedTrick, 9>,
+    pub current_trick: List<Card, 4>,
 }
 
 impl Clone for GameState {
@@ -88,18 +91,18 @@ impl GameState {
     pub fn create(players: [Player; 4]) -> Self {
         GameState {
             started: false,
-            players_started: vec![],
-            players_accept_undo: vec![],
+            players_started: List::new(),
+            players_accept_undo: List::new(),
             phase: GamePhase::WaitingForStart,
             trump: None,
-            trump_called: vec![],
+            trump_called: List::new(),
             player_at_turn: PlaceAtTable(0),
             value: Points(115),
             bidding_players: 4,
             bidding_history: vec![],
             players,
-            all_tricks: vec![],
-            current_trick: vec![],
+            all_tricks: List::new(),
+            current_trick: List::new(),
         }
     }
     pub fn player_at_turn(&self) -> &Player {
@@ -133,10 +136,10 @@ impl GameState {
 
     pub fn players_perspective(&self, place: PlaceAtTable) -> [String; 4] {
         [
-            self.player_at_place(place).name.clone(),
-            self.player_at_place(place.next()).name.clone(),
-            self.player_at_place(place.partner()).name.clone(),
-            self.player_at_place(place.prev()).name.clone(),
+            self.player_at_place(place).name.to_string(),
+            self.player_at_place(place.next()).name.to_string(),
+            self.player_at_place(place.partner()).name.to_string(),
+            self.player_at_place(place.prev()).name.to_string(),
         ]
     }
 
@@ -153,7 +156,7 @@ impl GameState {
         let mut started = vec![];
         for player in &self.players {
             if self.players_started.contains(&player.place_at_table) {
-                started.push(player.name.clone());
+                started.push(player.name.to_string());
             }
         }
         started

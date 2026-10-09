@@ -2,11 +2,29 @@ use std::fmt;
 
 use serde::Serialize;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
-use strum::IntoEnumIterator;
+#[cfg(feature = "public-api")]
 use strum_macros::EnumIter;
 
+#[cfg(feature = "public-api")]
 use crate::bits::{self, CardSet};
-use crate::game::parse::parse_card;
+#[cfg(not(feature = "public-api"))]
+use crate::inline::Filler;
+
+pub const SUITS: [Suit; 4] = [Suit::Green, Suit::Acorns, Suit::Bells, Suit::Red];
+pub const VALUES: [Value; 9] = [
+    Value::Six,
+    Value::Seven,
+    Value::Eight,
+    Value::Nine,
+    Value::Unter,
+    Value::Ober,
+    Value::King,
+    Value::Ten,
+    Value::Ace,
+];
+pub const CARDS: usize = SUITS.len() * VALUES.len();
+const SUIT_CODES: [char; 4] = ['g', 'e', 's', 'r'];
+const VALUE_CODES: [char; 9] = ['6', '7', '8', '9', 'U', 'O', 'K', 'Z', 'A'];
 
 #[derive(
     Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, DeserializeFromStr, SerializeDisplay,
@@ -17,7 +35,8 @@ pub struct Card {
     pub value: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash, EnumIter, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize)]
+#[cfg_attr(feature = "public-api", derive(EnumIter))]
 pub enum Suit {
     Green,
     Acorns,
@@ -31,7 +50,8 @@ impl fmt::Display for Suit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash, EnumIter, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize)]
+#[cfg_attr(feature = "public-api", derive(EnumIter))]
 pub enum Value {
     Six,
     Seven,
@@ -50,13 +70,72 @@ impl fmt::Display for Value {
     }
 }
 
-/**
- * Returns whether first card is higher than second card.
- */
-pub fn is_higher_card(higher: &Card, lower: &Card, trump: Option<Suit>) -> bool {
-    bits::takes(bits::index(higher), bits::index(lower), trump)
+impl Suit {
+    pub const fn code(self) -> char {
+        SUIT_CODES[self as usize]
+    }
+
+    pub fn from_code(code: char) -> Option<Self> {
+        SUIT_CODES.iter().position(|&c| c == code).map(|i| SUITS[i])
+    }
 }
 
+impl Value {
+    pub const fn code(self) -> char {
+        VALUE_CODES[self as usize]
+    }
+
+    pub fn from_code(code: char) -> Option<Self> {
+        VALUE_CODES
+            .iter()
+            .position(|&c| c == code)
+            .map(|i| VALUES[i])
+    }
+}
+
+impl Card {
+    /// Bit index, in enum order (suit, then value).
+    #[inline]
+    pub const fn index(self) -> u8 {
+        self.suit as u8 * VALUES.len() as u8 + self.value as u8
+    }
+
+    #[inline]
+    pub const fn from_index(index: u8) -> Self {
+        Card {
+            suit: suit_of(index),
+            value: value_of(index),
+        }
+    }
+}
+
+#[inline]
+pub const fn suit_of(index: u8) -> Suit {
+    SUITS[index as usize / VALUES.len()]
+}
+
+#[inline]
+pub const fn value_of(index: u8) -> Value {
+    VALUES[index as usize % VALUES.len()]
+}
+
+#[cfg(not(feature = "public-api"))]
+impl Filler for Card {
+    const FILL: Self = Card::from_index(0);
+}
+
+#[cfg(not(feature = "public-api"))]
+impl Filler for Suit {
+    const FILL: Self = Suit::Green;
+}
+
+/// Whether `higher` takes `lower` (rule owner: `bits::takes`).
+#[cfg(feature = "public-api")]
+pub fn is_higher_card(higher: &Card, lower: &Card, trump: Option<Suit>) -> bool {
+    bits::takes(higher.index(), lower.index(), trump)
+}
+
+#[cfg(feature = "public-api")]
 pub fn higher_cards(card: &Card, trump: Option<Suit>, pool: Option<Vec<Card>>) -> Vec<Card> {
     pool.unwrap_or_else(get_all_cards)
         .into_iter()
@@ -65,6 +144,7 @@ pub fn higher_cards(card: &Card, trump: Option<Suit>, pool: Option<Vec<Card>>) -
 }
 
 /// The card that currently wins the trick, if any (rule owner: `bits::trick_winner`).
+#[cfg(feature = "public-api")]
 pub fn high_card(trick: Vec<&Card>, trump: Option<Suit>) -> Option<&Card> {
     trick.into_iter().reduce(|winner, card| {
         if card == winner || bits::takes(bits::index(card), bits::index(winner), trump) {
@@ -76,19 +156,22 @@ pub fn high_card(trick: Vec<&Card>, trump: Option<Suit>) -> Option<&Card> {
 }
 
 /// Keeps the cards of `cards` that are in `allowed`, in their original order.
+#[cfg(feature = "public-api")]
 fn keep(cards: Vec<&Card>, allowed: CardSet) -> Vec<&Card> {
     let mut cards = cards;
-    cards.retain(|c| allowed.contains(bits::index(c)));
+    cards.retain(|c| allowed.contains(c.index()));
     cards
 }
 
 /// Only for the first played card in the game. Proper play in rest of first trick handled elsewhere.
+#[cfg(feature = "public-api")]
 pub fn allowed_first(cards: Vec<&Card>) -> Vec<&Card> {
     allowed_cards(vec![], cards, None, true)
 }
 
 /// The cards of `cards` that may be played into `trick`, in hand order
 /// (the rule: `bits::play_levels`).
+#[cfg(feature = "public-api")]
 pub fn allowed_cards<'a>(
     trick: Vec<&'a Card>,
     cards: Vec<&'a Card>,
@@ -102,27 +185,30 @@ pub fn allowed_cards<'a>(
 }
 
 /// Suits of which `cards` hold the King or the Ober.
+#[cfg(feature = "public-api")]
 pub fn halves(cards: Vec<Card>) -> Vec<Suit> {
     let hand = CardSet::from_cards(&cards);
-    Suit::iter()
+    SUITS
+        .into_iter()
         .filter(|&s| !(hand & CardSet::halves(s)).is_empty())
         .collect()
 }
 
 /// Suits of which `cards` hold both the King and the Ober.
+#[cfg(feature = "public-api")]
 pub fn pairs(cards: Vec<Card>) -> Vec<Suit> {
     let hand = CardSet::from_cards(&cards);
-    Suit::iter()
+    SUITS
+        .into_iter()
         .filter(|&s| CardSet::halves(s).is_subset(hand))
         .collect()
 }
 
 pub fn get_all_cards() -> Vec<Card> {
-    Suit::iter()
-        .flat_map(|suit| Value::iter().map(move |value| Card { suit, value }))
-        .collect()
+    (0..CARDS as u8).map(Card::from_index).collect()
 }
 
+#[cfg(feature = "public-api")]
 pub fn print_cards(cards: &[Card]) {
     let card_strs: Vec<String> = cards.iter().map(|c| format!("{}", c)).collect();
     let s = card_strs.join(", ");
@@ -131,24 +217,7 @@ pub fn print_cards(cards: &[Card]) {
 
 impl fmt::Display for Card {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let suit = match self.suit {
-            Suit::Red => "r",
-            Suit::Bells => "s",
-            Suit::Acorns => "e",
-            Suit::Green => "g",
-        };
-        let value = match self.value {
-            Value::Ace => "A",
-            Value::Ten => "Z",
-            Value::King => "K",
-            Value::Ober => "O",
-            Value::Unter => "U",
-            Value::Nine => "9",
-            Value::Eight => "8",
-            Value::Seven => "7",
-            Value::Six => "6",
-        };
-        write!(f, "{}-{}", suit, value)
+        write!(f, "{}-{}", self.suit.code(), self.value.code())
     }
 }
 
@@ -162,11 +231,20 @@ impl std::str::FromStr for Card {
     type Err = std::io::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        parse_card(String::from(s))
+        if s.len() != 3 {
+            return Err(std::io::Error::other("wrong card format"));
+        }
+        // Preserve the upstream parser's acceptance of any middle byte.
+        let code = s.as_bytes();
+        let invalid = || std::io::Error::other("Wrong card format");
+        Ok(Card {
+            suit: Suit::from_code(code[0] as char).ok_or_else(invalid)?,
+            value: Value::from_code(code[2] as char).ok_or_else(invalid)?,
+        })
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "public-api"))]
 mod tests {
     use crate::game::parse::parse_cards;
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "public-api")]
 use std::cell::RefCell;
 
 use crate::bits::{self, CardSet};
@@ -9,6 +10,7 @@ use crate::game::points::Points;
 use crate::game::Game;
 
 impl GamePhase {
+    #[cfg(feature = "public-api")]
     pub fn legal_actions(&self, game: &Game) -> Vec<GameAction> {
         let mut out = vec![];
         self.push_legal_actions(game, &mut out);
@@ -65,20 +67,57 @@ impl GamePhase {
     }
 }
 
+/// Membership without generating card, pass or bid lists; other actions use their short list.
+#[cfg(not(feature = "public-api"))]
+pub(crate) fn is_legal_in_phase(game: &Game, action: &GameAction) -> bool {
+    let at_turn = action.player == game.state.player_at_turn;
+    match (&game.state.phase, &action.action_type) {
+        (GamePhase::WaitingForStart, ActionType::Start) => {
+            action.player.0 < 4 && !game.state.players_started.contains(&action.player)
+        }
+        (GamePhase::Bidding | GamePhase::Raising, ActionType::NewBid(value)) => {
+            at_turn
+                && *value > game.state.value.0
+                && *value <= MAX_BID
+                && (*value - game.state.value.0) % BID_STEP == 0
+        }
+        (GamePhase::Bidding, ActionType::StopBidding) => at_turn,
+        (GamePhase::PassingForth | GamePhase::PassingBack, ActionType::Pass(cards)) => {
+            at_turn && is_legal_pass(game, cards)
+        }
+        (
+            GamePhase::Raising | GamePhase::StartTrick | GamePhase::Trick,
+            ActionType::CardPlayed(card),
+        ) => at_turn && allowed_cards(game).contains(card.index()),
+        (GamePhase::StartTrick, ActionType::Question(_) | ActionType::AnnounceTrump(_))
+        | (GamePhase::AnsweringPair | GamePhase::AnsweringHalf(_), ActionType::Answer(_))
+        | (GamePhase::PendingUndo(_), ActionType::UndoAccept | ActionType::UndoDecline) => {
+            let mut legal = Vec::new();
+            game.state.phase.push_legal_actions(game, &mut legal);
+            legal.contains(action)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "public-api")]
 pub fn legal_bidding(game: &Game) -> Vec<GameAction> {
     let mut out = Vec::with_capacity(62);
     push_bidding(game, &mut out);
     out
 }
 
+const BID_STEP: i32 = 5;
+const MAX_BID: i32 = 420;
+
 fn push_bidding(game: &Game, out: &mut Vec<GameAction>) {
-    let start_value = game.state.value + Points(5);
+    let start_value = game.state.value + Points(BID_STEP);
     let player = game.state.player_at_turn;
     out.push(GameAction {
         action_type: ActionType::StopBidding,
         player,
     });
-    for allowed_value in (start_value.0..=420).step_by(5) {
+    for allowed_value in (start_value.0..=MAX_BID).step_by(BID_STEP as usize) {
         out.push(GameAction {
             action_type: ActionType::NewBid(allowed_value),
             player,
@@ -88,6 +127,7 @@ fn push_bidding(game: &Game, out: &mut Vec<GameAction>) {
 
 /// Every 4-card subset of the hand, in the order of `itertools::combinations` over the hand,
 /// each sorted from high to low.
+#[cfg(feature = "public-api")]
 pub fn legal_passing(game: &Game) -> Vec<GameAction> {
     let mut out = vec![];
     push_passing(game, &mut out);
@@ -102,23 +142,26 @@ fn push_passing(game: &Game, out: &mut Vec<GameAction>) {
         return;
     }
     out.reserve(n * (n - 1) * (n - 2) * (n - 3) / 24);
-    // `bits::index` orders cards like `Card`'s `Ord` (suit, then value).
-    let idx: Vec<u8> = cards.iter().map(bits::index).collect();
-    PASS_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
+    let mut generate = |#[cfg(feature = "public-api")] pool: &mut Vec<Vec<Card>>| {
         for a in 0..n {
             for b in a + 1..n {
                 for c in b + 1..n {
                     for d in c + 1..n {
-                        let [w, x, y, z] = sorted_desc([idx[a], idx[b], idx[c], idx[d]]);
-                        let mut pass = pool.pop().unwrap_or_else(|| Vec::with_capacity(4));
-                        pass.clear();
-                        pass.extend_from_slice(&[
-                            bits::card(w),
-                            bits::card(x),
-                            bits::card(y),
-                            bits::card(z),
-                        ]);
+                        let pass = sorted_desc([
+                            cards[a].index(),
+                            cards[b].index(),
+                            cards[c].index(),
+                            cards[d].index(),
+                        ])
+                        .map(Card::from_index);
+                        #[cfg(feature = "public-api")]
+                        let pass = {
+                            let mut buffer =
+                                pool.pop().unwrap_or_else(|| Vec::with_capacity(pass.len()));
+                            buffer.clear();
+                            buffer.extend_from_slice(&pass);
+                            buffer
+                        };
                         out.push(GameAction {
                             action_type: ActionType::Pass(pass),
                             player,
@@ -127,7 +170,11 @@ fn push_passing(game: &Game, out: &mut Vec<GameAction>) {
                 }
             }
         }
-    });
+    };
+    #[cfg(feature = "public-api")]
+    PASS_POOL.with(|pool| generate(&mut pool.borrow_mut()));
+    #[cfg(not(feature = "public-api"))]
+    generate();
 }
 
 /// Four card indices from high to low (a sorting network).
@@ -143,13 +190,16 @@ fn sorted_desc(mut x: [u8; 4]) -> [u8; 4] {
 // A game generates 126 + 715 four-card passes, each a `Vec<Card>` by the public type. Their
 // buffers are recycled per thread (at most `PASS_POOL_MAX`), so a simulation loop does not
 // allocate them again; measured in the pull request that added it.
+#[cfg(feature = "public-api")]
 const PASS_POOL_MAX: usize = 1024;
 
+#[cfg(feature = "public-api")]
 thread_local! {
     static PASS_POOL: RefCell<Vec<Vec<Card>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Empties `actions`, keeping the buffers of passes for the next passing list.
+#[cfg(feature = "public-api")]
 pub(crate) fn recycle(actions: &mut Vec<GameAction>) {
     if !matches!(
         actions.first().map(|a| &a.action_type),
@@ -170,21 +220,31 @@ pub(crate) fn recycle(actions: &mut Vec<GameAction>) {
     });
 }
 
+/// Whether `cards` is a pass the player at turn may make: four cards of their hand from high
+/// to low, i.e. exactly the members of `legal_passing`.
+#[cfg(not(feature = "public-api"))]
+pub(crate) fn is_legal_pass(game: &Game, cards: &[Card]) -> bool {
+    let hand = &game.state.player_at_turn().cards;
+    cards.len() == 4
+        && cards.windows(2).all(|w| w[0] > w[1])
+        && cards.iter().all(|c| hand.contains(c))
+}
+
 /// The first trick is played while the player still holds a full hand.
 pub fn is_first_trick(hand_len: usize) -> bool {
     hand_len == HAND_SIZE
 }
 
 /// The cards the player at turn may play (the rule: `bits::play_levels`), in hand order.
+#[cfg(feature = "public-api")]
 pub fn legal_cards(game: &Game) -> Vec<GameAction> {
     let mut out = Vec::with_capacity(9);
     push_cards(game, &mut out);
     out
 }
 
-fn push_cards(game: &Game, out: &mut Vec<GameAction>) {
+fn allowed_cards(game: &Game) -> CardSet {
     let state = &game.state;
-    let player = state.player_at_turn;
     let cards = &state.player_at_turn().cards;
     let trick = if state.current_trick.len() == 4 {
         &[][..]
@@ -197,7 +257,13 @@ fn push_cards(game: &Game, out: &mut Vec<GameAction>) {
     }
     let hand = CardSet::from_cards(cards);
     let first_trick = is_first_trick(cards.len());
-    let allowed = bits::play_levels(&idx[..trick.len()], state.trump, first_trick).allowed(hand);
+    bits::play_levels(&idx[..trick.len()], state.trump, first_trick).allowed(hand)
+}
+
+fn push_cards(game: &Game, out: &mut Vec<GameAction>) {
+    let player = game.state.player_at_turn;
+    let cards = &game.state.player_at_turn().cards;
+    let allowed = allowed_cards(game);
     for &card in cards {
         if allowed.contains(bits::index(&card)) {
             out.push(GameAction {
@@ -215,6 +281,7 @@ fn pair_suits(hand: CardSet) -> impl Iterator<Item = Suit> {
         .filter(move |&s| CardSet::halves(s).is_subset(hand))
 }
 
+#[cfg(feature = "public-api")]
 pub fn legal_question(game: &Game) -> Vec<GameAction> {
     let mut out = Vec::with_capacity(10);
     push_question(game, &mut out);
@@ -243,6 +310,7 @@ fn push_question(game: &Game, actions: &mut Vec<GameAction>) {
     }
 }
 
+#[cfg(feature = "public-api")]
 pub fn legal_answer(game: &Game) -> Vec<GameAction> {
     let mut out = Vec::with_capacity(4);
     push_answer(game, &mut out);

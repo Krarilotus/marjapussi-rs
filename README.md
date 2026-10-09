@@ -8,6 +8,10 @@ This package is hopefully going to be used for the backend of [marjapussi.de](ht
 
 ## Usage
 
+The default `public-api` feature preserves the public types and utility binaries.
+Use `cargo build --no-default-features` for lean simulations: inline state storage,
+array passes, shared names and metadata, on-demand legal actions, and no wall-clock timestamps.
+
 For now this contains the full implementation of the game and two utility binaries:
 
 - `interactive` for playing the game in the terminal with full information against yourself.

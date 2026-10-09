@@ -2,7 +2,8 @@ use std::ops::{Add, AddAssign};
 
 use serde::Serialize;
 
-use crate::game::cards::{Card, Suit};
+use crate::game::cards::{Card, Suit, CARDS, VALUES};
+#[cfg(feature = "public-api")]
 use crate::game::player::PlaceAtTable;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -31,12 +32,12 @@ pub const PAIR_POINTS: [i32; 4] = [40, 60, 80, 100];
 /// Bonus for winning the last trick.
 pub const LAST_TRICK_BONUS: i32 = 20;
 
-/// Points of each card by bit index (`bits::index`), derived from `VALUE_POINTS`.
-pub const CARD_POINTS: [u8; 36] = {
-    let mut t = [0u8; 36];
+/// Points of each card by `Card::index`, derived from `VALUE_POINTS`.
+pub const CARD_POINTS: [u8; CARDS] = {
+    let mut t = [0u8; CARDS];
     let mut i = 0;
-    while i < 36 {
-        t[i] = VALUE_POINTS[i % 9] as u8;
+    while i < CARDS {
+        t[i] = VALUE_POINTS[i % VALUES.len()] as u8;
         i += 1;
     }
     t
@@ -50,12 +51,14 @@ pub fn points_card(card: Card) -> Points {
     Points(VALUE_POINTS[card.value as usize])
 }
 
+#[cfg(feature = "public-api")]
 pub fn points_trick(trick: Vec<Card>) -> Points {
     trick
         .into_iter()
         .fold(Points(0), |acc, c| acc + points_card(c))
 }
 
+#[cfg(feature = "public-api")]
 pub fn points_players(tricks: Vec<(Vec<Card>, PlaceAtTable)>) -> [Points; 4] {
     let mut points = [Points(0); 4];
     for (trick, place) in tricks {

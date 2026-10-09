@@ -1,16 +1,21 @@
+#[cfg(feature = "public-api")]
 use std::cell::RefCell;
+#[cfg(feature = "public-api")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "public-api")]
 use chrono::offset::Local;
+#[cfg(feature = "public-api")]
 use chrono::DateTime;
 
 use crate::game::errors::GameError;
 use crate::game::gameevent::{ActionType, GameAction, GameEvent};
 use crate::game::gamestate::GamePhase;
-use crate::game::player::create_players;
+use crate::game::player::{create_players, PlaceAtTable};
 use crate::game::points::Points;
 
 use self::{cards::Card, gameinfo::GameMetaInfo, gamestate::GameState};
+use crate::storage::Meta;
 
 mod apply_action;
 pub mod cards;
@@ -19,16 +24,19 @@ pub mod gameevent;
 pub mod gameinfo;
 pub mod gamestate;
 pub mod legal_actions;
+#[cfg(feature = "public-api")]
 pub mod parse;
 pub mod player;
 pub mod points;
+#[cfg(feature = "public-api")]
 pub mod series;
 
 /// Wrapper for Game and all of its details.
 #[derive(Debug, Clone)]
 pub struct Game {
-    pub info: GameMetaInfo,
+    pub info: Meta,
     pub state: GameState,
+    #[cfg(feature = "public-api")]
     pub legal_actions: Vec<GameAction>,
     pub last_state: Option<GameState>,
     pub all_events: Vec<GameEvent>,
@@ -38,45 +46,77 @@ impl Game {
     pub fn new(name: String, player_names: [String; 4], cards: Option<[Vec<Card>; 4]>) -> Self {
         let players = create_players(player_names.clone(), cards);
 
-        let mut game = Game {
-            info: GameMetaInfo::create(name, player_names, players.clone()),
-            state: GameState::create(players.clone()),
+        let info = GameMetaInfo::create(name, player_names, players.clone());
+        #[cfg(not(feature = "public-api"))]
+        let info = std::sync::Arc::new(info);
+        let game = Game {
+            info,
+            state: GameState::create(players),
+            #[cfg(feature = "public-api")]
             legal_actions: vec![],
             last_state: None,
             all_events: vec![],
         };
-        game.legal_actions = game.legal_actions();
+        #[cfg(feature = "public-api")]
+        let game = {
+            let mut game = game;
+            game.legal_actions = game.legal_actions();
+            game
+        };
         game
     }
 
     /// Creates list with all legal actions in the current state of the game.
     pub fn legal_actions(&self) -> Vec<GameAction> {
         let mut legal = vec![];
-        self.push_legal_actions(&mut legal);
+        self.legal_actions_into(&mut legal);
         legal
+    }
+
+    /// Replaces `legal` with this state's actions, reusing its buffer.
+    pub fn legal_actions_into(&self, legal: &mut Vec<GameAction>) {
+        #[cfg(feature = "public-api")]
+        legal_actions::recycle(legal);
+        #[cfg(not(feature = "public-api"))]
+        legal.clear();
+        self.push_legal_actions(legal);
     }
 
     fn push_legal_actions(&self, legal: &mut Vec<GameAction>) {
         self.state.phase.push_legal_actions(self, legal);
+        if let Some(player) = self.undo_requester() {
+            legal.push(GameAction {
+                action_type: ActionType::UndoRequest,
+                player,
+            });
+        }
+    }
+
+    fn undo_requester(&self) -> Option<PlaceAtTable> {
         match self.state.phase {
             GamePhase::WaitingForStart
             | GamePhase::Ended
             | GamePhase::PassingBack
             | GamePhase::Raising
-            | GamePhase::PendingUndo(_) => return,
-            GamePhase::Bidding if self.state.value == Points(115) => return,
-            _ => {}
-        }
-        if let Some(last) = &self.last_state {
-            legal.push(GameAction {
-                action_type: ActionType::UndoRequest,
-                player: last.player_at_turn,
-            });
+            | GamePhase::PendingUndo(_) => None,
+            GamePhase::Bidding if self.state.value == Points(115) => None,
+            _ => self.last_state.as_ref().map(|last| last.player_at_turn),
         }
     }
 
-    fn is_legal(&self, action: &GameAction) -> bool {
-        self.legal_actions.contains(action)
+    /// Whether `action` is legal. Lean builds check the state without a cached action list.
+    pub fn is_legal(&self, action: &GameAction) -> bool {
+        #[cfg(feature = "public-api")]
+        {
+            self.legal_actions.contains(action)
+        }
+        #[cfg(not(feature = "public-api"))]
+        {
+            if action.action_type == ActionType::UndoRequest {
+                return self.undo_requester() == Some(action.player);
+            }
+            legal_actions::is_legal_in_phase(self, action)
+        }
     }
 
     /// Tries creating a new Game with state after applying a given action.
@@ -95,6 +135,7 @@ impl Game {
         let mut next_game = Game {
             info: self.info.clone(),
             state: self.state.clone(),
+            #[cfg(feature = "public-api")]
             legal_actions: vec![],
             last_state: if keeps_snapshot {
                 self.last_state.clone()
@@ -127,17 +168,23 @@ impl Game {
             last_action: action,
             callback,
             player_at_turn: self.state.player_at_turn,
+            #[cfg(feature = "public-api")]
             time: current_time_string(),
+            #[cfg(not(feature = "public-api"))]
+            time: 0,
         });
-        let mut legal = std::mem::take(&mut self.legal_actions);
-        legal_actions::recycle(&mut legal);
-        self.push_legal_actions(&mut legal);
-        self.legal_actions = legal;
+        #[cfg(feature = "public-api")]
+        {
+            let mut legal = std::mem::take(&mut self.legal_actions);
+            self.legal_actions_into(&mut legal);
+            self.legal_actions = legal;
+        }
     }
 }
 
 /// Local wall-clock time as `YYYY-MM-DD HH:MM:SS`. The text is formatted once per second and
 /// per thread and then reused: formatting local time costs more than a whole card play.
+#[cfg(feature = "public-api")]
 pub fn current_time_string() -> String {
     thread_local! {
         static CACHE: RefCell<(u64, String)> = const { RefCell::new((u64::MAX, String::new())) };
@@ -157,7 +204,7 @@ pub fn current_time_string() -> String {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "public-api"))]
 mod tests {
     use super::*;
     use crate::game::cards::Suit;
