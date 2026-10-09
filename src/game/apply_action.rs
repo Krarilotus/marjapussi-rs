@@ -181,13 +181,12 @@ impl Game {
                 let asker_hand = CardSet::from_cards(&state.partner().cards);
                 if !(asker_hand & CardSet::halves(suit)).is_empty() {
                     if state.trump_called.contains(&suit) {
-                        //if called for second time, can't be excluded
                         callback = Some(GameCallback::StillTrump(suit));
                     } else {
                         callback = Some(GameCallback::NewTrump(suit));
                         state.trump_called.push(suit);
+                        state.trump = Some(suit);
                     }
-                    state.trump = Some(suit);
                 } else {
                     callback = Some(GameCallback::OnlyHalf(suit));
                 }
